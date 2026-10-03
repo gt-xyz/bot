@@ -1,7 +1,7 @@
-#include "libbee/project.hpp"
+#include "libbot/project.hpp"
 
-#include "libbee/command.hpp"
-#include "libbee/render.hpp"
+#include "libbot/command.hpp"
+#include "libbot/render.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,9 @@
 #include <fstream>
 #include <sstream>
 
-namespace bee {
+#include <unistd.h>
+
+namespace bot {
 namespace {
 
 constexpr auto knownProfiles = std::array<std::string_view, 3>{"cpp", "scratch", "none"};
@@ -97,20 +99,9 @@ auto profile_summary(std::string_view profile) -> std::string_view
     return "none — notes and docs, no build";
 }
 
-auto profile_image(std::string_view profile) -> std::string_view
-{
-    if (profile == "cpp") {
-        return "bee-cpp:latest";
-    }
-    if (profile == "scratch") {
-        return "bee-scratch:latest";
-    }
-    return "bee-base:latest";
-}
-
-// The name becomes a path here and an argument to a remote shell over ssh, so
-// it is restricted rather than escaped: there is no quoting that is correct for
-// every remote shell.
+// The name becomes a path, a container name and an argument to a remote shell
+// over ssh, so it is restricted rather than escaped: there is no quoting that
+// is correct for every remote shell.
 auto is_valid_name(std::string_view name) -> bool
 {
     if (name.empty() || name.size() > 64) {
@@ -135,7 +126,6 @@ auto scaffold(Config const& config, NewProject const& project,
         {"name", project.name},
         {"description", project.description},
         {"profile", project.profile},
-        {"image", std::string{profile_image(project.profile)}},
         {"notes", project.notes.empty() ? "Nothing captured beyond the description." : project.notes},
     };
 
@@ -148,48 +138,117 @@ auto scaffold(Config const& config, NewProject const& project,
     return write_file(directory / "work" / "0001-shape-v0.1.md", seed_work(project));
 }
 
-auto create(Config const& config, NewProject const& project)
-    -> std::expected<std::filesystem::path, std::string>
+auto create(Config const& config, NewProject const& project) -> std::expected<std::string, std::string>
 {
     if (!is_valid_name(project.name)) {
         return std::unexpected(std::format("'{}' is not a usable project name", project.name));
     }
 
-    auto const directory = config.projects / project.name;
-    if (std::filesystem::exists(directory)) {
-        return std::unexpected(std::format("already exists: {}", directory.string()));
+    auto const url = config.remote_url(project.name);
+    auto const bare = std::format("{}/{}.git", config.remoteRoot, project.name);
+    if (config.remote_is_local() && std::filesystem::exists(bare)) {
+        return std::unexpected(std::format("already exists: {}", bare));
     }
 
+    // The scaffold is committed in a directory that is deleted once pushed: a
+    // project's home is its remote, and a session makes its own clone.
+    auto const directory = std::filesystem::temp_directory_path() / std::format("bot-init-{}-{}", project.name, ::getpid());
+    auto const cleanup = [&directory] {
+        auto ignored = std::error_code{};
+        std::filesystem::remove_all(directory, ignored);
+    };
+
     if (auto written = scaffold(config, project, directory); !written) {
+        cleanup();
         return std::unexpected(written.error());
     }
 
+    auto const makeBare = config.remote_is_local()
+        ? std::vector<std::string>{"git", "init", "-q", "--bare", "-b", "main", bare}
+        : std::vector<std::string>{"ssh", config.remoteHost, "git", "init", "-q", "--bare", "-b", "main", bare};
     for (auto const& argv : std::initializer_list<std::vector<std::string>>{
              {"git", "init", "-q", "-b", "main"},
              {"git", "add", "-A"},
              {"git", "commit", "-q", "-m", std::format("Scaffold {} ({} profile)", project.name, project.profile)},
+             makeBare,
+             {"git", "push", "-q", url, "main"},
          }) {
         if (auto done = run_succeeds(argv, directory); !done) {
+            cleanup();
             return std::unexpected(done.error());
         }
     }
 
-    if (config.has_remote()) {
-        auto const bare = std::format("{}/{}.git", config.remoteRoot, project.name);
-        if (auto made = run_succeeds({"ssh", config.remoteHost, "git", "init", "--bare", bare}); !made) {
-            return std::unexpected(made.error());
+    cleanup();
+    return url;
+}
+
+auto Project::next_title() const -> std::string
+{
+    auto const found = std::ranges::find_if(work, [](Work const& item) { return item.next; });
+    return found != work.end() ? found->title : std::string{};
+}
+
+auto project_names(Config const& config) -> std::expected<std::vector<std::string>, std::string>
+{
+    if (!config.remote_is_local()) {
+        return std::unexpected(std::format("the projects are on {}; the board is read where they live", config.remoteHost));
+    }
+    auto names = std::vector<std::string>{};
+    auto error = std::error_code{};
+    for (auto const& entry : std::filesystem::directory_iterator{config.remoteRoot, error}) {
+        if (entry.is_directory() && entry.path().extension() == ".git" && is_valid_name(entry.path().stem().string())) {
+            names.push_back(entry.path().stem().string());
         }
-        for (auto const& argv : std::initializer_list<std::vector<std::string>>{
-                 {"git", "remote", "add", "origin", config.remote_url(project.name)},
-                 {"git", "push", "-q", "-u", "origin", "main"},
-             }) {
-            if (auto done = run_succeeds(argv, directory); !done) {
-                return std::unexpected(done.error());
-            }
+    }
+    std::ranges::sort(names);
+    return names;
+}
+
+// Three reads of the bare repository, and only ever of main: a branch a
+// session published is not the project until its owner merges it.
+auto describe(Config const& config, std::string const& name) -> Project
+{
+    auto project = Project{};
+    project.name = name;
+    auto const git = [&](std::vector<std::string> arguments) {
+        arguments.insert(arguments.begin(), {"git", "--git-dir", config.remote_url(name)});
+        return run_succeeds(arguments).value_or(std::string{});
+    };
+
+    auto commits = std::istringstream{git({"log", "-2", "--format=%cr", "main"})};
+    auto second = std::string{};
+    std::getline(commits, project.lastCommit);
+    project.scaffoldOnly = !project.lastCommit.empty() && !std::getline(commits, second);
+
+    // The first line of prose under the heading is the description `init` asked for.
+    auto document = std::istringstream{git({"show", "main:docs/PROJECT.md"})};
+    for (auto line = std::string{}; std::getline(document, line);) {
+        if (!line.empty() && !line.starts_with('#')) {
+            project.description = line;
+            break;
         }
     }
 
-    return directory;
+    // Lines look like main:work/0001-shape.md:title: Shape v0.1
+    auto matches = std::istringstream{git({"grep", "-E", "^(title|next): ", "main", "--", "work/"})};
+    for (auto line = std::string{}; std::getline(matches, line);) {
+        auto const fileEnd = line.find(".md:");
+        if (!line.starts_with("main:work/") || fileEnd == std::string::npos) {
+            continue;
+        }
+        auto const file = line.substr(10, fileEnd + 3 - 10);
+        auto const field = line.substr(fileEnd + 4);
+        if (project.work.empty() || project.work.back().file != file) {
+            project.work.push_back(Work{file, {}, false});
+        }
+        if (field.starts_with("title: ") && project.work.back().title.empty()) {
+            project.work.back().title = field.substr(7);
+        } else if (field == "next: true") {
+            project.work.back().next = true;
+        }
+    }
+    return project;
 }
 
 }

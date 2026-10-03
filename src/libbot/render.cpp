@@ -1,6 +1,6 @@
-#include "libbee/render.hpp"
+#include "libbot/render.hpp"
 
-namespace bee {
+namespace bot {
 
 // Only the given keys are replaced, so a template holding another tool's
 // {{ }} syntax passes through untouched.

@@ -1,6 +1,5 @@
 ---
 title: Starting and attaching a session
-next: true
 ---
 
 `bee new` scaffolds, commits and pushes, then stops. A project is not yet a

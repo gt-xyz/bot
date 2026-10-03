@@ -1,0 +1,7 @@
+# The only way out of a session's network. bot writes its configuration and
+# its list of allowed names, and mounts them read-only.
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tinyproxy \
+ && rm -rf /var/lib/apt/lists/*

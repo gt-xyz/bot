@@ -1,0 +1,24 @@
+# Everything a session has to work with, and the same for every project. A
+# session cannot add to it: it is not root, its root filesystem is read-only
+# and it has no route to a package mirror. A tool a project needs is added
+# here, where its owner can read the line. The image carries no secret.
+FROM docker.io/library/debian:trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq less ripgrep \
+      build-essential clang cmake ninja-build \
+      python3 python3-venv python3-pytest \
+      nodejs npm \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+RUN UV_TOOL_DIR=/opt/uv UV_TOOL_BIN_DIR=/usr/local/bin uv tool install ruff
+
+# The agent. Work note 0013 gives each agent an image of its own; until then
+# there is one agent and it lives here. It cannot update itself in place.
+RUN npm install --global @anthropic-ai/claude-code
+ENV DISABLE_AUTOUPDATER=1
+
+RUN mkdir -p /work /home/agent
+WORKDIR /work
