@@ -19,7 +19,10 @@ RUN UV_TOOL_DIR=/opt/uv UV_TOOL_BIN_DIR=/usr/local/bin uv tool install ruff
 
 # The agent. Work note 0013 gives each agent an image of its own; until then
 # there is one agent and it lives here. It cannot update itself in place.
-RUN npm install --global @anthropic-ai/claude-code
+# npm runs a package's install script only when told it may, and this one's
+# is what puts the program in place; the build fails here if it did not.
+RUN npm install --global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code \
+ && claude --version
 ENV DISABLE_AUTOUPDATER=1
 
 RUN mkdir -p /work /home/agent
