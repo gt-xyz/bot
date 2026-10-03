@@ -1,6 +1,30 @@
-# bee
+# bot
 
-One command per project: a repository, a container, a session, an agent.
+One program on one machine you own: projects, and contained sessions of an
+agent on them, managed from any device on your network.
+
+This is the rewrite of bee. It keeps bee's reasons and changes three things,
+each with a work note: the tool is `bot` and a running agent is a session
+(0007); projects and sessions are separate things, and a session gets its own
+clone (0007); a session sees its project and nothing else, proven by a check
+rather than remembered (0008). The sections below are bee's and still hold
+unless a note says otherwise. Until 0007 lands, the code and the older
+sections still say bee.
+
+## Scope is a budget
+
+bee's own rule, applied to bee's successor: a budget that fails a build beats
+an intention that decays. The work notes are the whole scope.
+
+- No feature without a work note, and a note says what it does not do.
+- One binary, one library, files on disk, state derived. No database, no
+  daemon, no queue, no plugin system.
+- One adapter, the hosted model's CLI, until a second provider is actually
+  wanted. The seam (0013) exists; the second adapter does not.
+- No JavaScript in the web face. A web terminal and a push relay are existing
+  tools run beside it, never code here.
+- A line budget on the library and the server, enforced by `test/check.sh`,
+  raised only by a commit that says why.
 
 ## Why
 
