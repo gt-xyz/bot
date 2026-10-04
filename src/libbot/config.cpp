@@ -63,17 +63,9 @@ auto default_config_path() -> std::filesystem::path
 
 auto is_host_name(std::string_view candidate) -> bool
 {
-    if (candidate.empty()) {
-        return false;
-    }
-    auto const plain = std::ranges::all_of(candidate, [](char const character) {
-        return std::islower(static_cast<unsigned char>(character)) != 0
-            || std::isdigit(static_cast<unsigned char>(character)) != 0 || character == '.' || character == '-';
-    });
-    auto const hasLetter = std::ranges::any_of(candidate, [](char const character) {
-        return std::islower(static_cast<unsigned char>(character)) != 0;
-    });
-    return plain && hasLetter && candidate.front() != '.' && candidate.front() != '-';
+    constexpr auto letters = std::string_view{"abcdefghijklmnopqrstuvwxyz"};
+    return candidate.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-") == std::string_view::npos
+        && candidate.find_first_of(letters) != std::string_view::npos && candidate.find_first_of(".-") != 0;
 }
 
 auto is_address(std::string_view candidate) -> bool

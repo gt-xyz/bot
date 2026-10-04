@@ -8,6 +8,7 @@
 #include <cctype>
 #include <format>
 #include <map>
+#include <ranges>
 
 #include <unistd.h>
 
@@ -15,17 +16,28 @@ namespace bot {
 namespace {
 
 constexpr auto stylesheet = std::string_view{
-    ":root{color-scheme:light dark}"
-    "body{font:16px/1.5 system-ui,sans-serif;max-width:48rem;margin:0 auto;padding:1rem}"
-    "h1{font-size:1.25rem;overflow-wrap:anywhere}h2{font-size:1rem;margin-top:2rem}"
-    "a{color:inherit}ul{list-style:none;padding:0}"
-    "li{padding:.6rem 0;border-top:1px solid #8884}"
-    "small{display:block;opacity:.7}b{font-weight:600}"
-    "textarea,input,select{font:inherit;width:100%;box-sizing:border-box;margin:.2rem 0}"
-    "button{font:inherit;padding:.4rem 1rem;margin:.2rem 0}"
-    ".you,.agent,.tool,.error{white-space:pre-wrap;overflow-wrap:anywhere;margin:.8rem 0}"
-    ".you{border-left:3px solid #8888;padding-left:.6rem}"
-    ".tool{font:13px/1.4 ui-monospace,monospace;opacity:.7}.error{color:#c33}"};
+    ":root{color-scheme:light dark;--line:#8884;--soft:#8882;--accent:#3d6fe8}"
+    "*{box-sizing:border-box}"
+    "body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:0 auto;padding:1rem 1rem 4rem}"
+    "a{color:inherit;text-decoration:none}h1{font-size:1.4rem;margin:.3rem 0 1rem;overflow-wrap:anywhere}"
+    "h2{font-size:1.15rem;margin:0}p{margin:.4rem 0}small,.muted{opacity:.65;font-size:.88rem}small{display:block}"
+    ".card{border:1px solid var(--line);border-radius:12px;padding:1rem;margin:1rem 0}"
+    ".row{display:flex;gap:.7rem;align-items:baseline;padding:.65rem 0;border-top:1px solid var(--line)}"
+    ".card>.row:first-of-type{margin-top:.8rem}"
+    ".pill{font-size:.75rem;padding:.1rem .6rem;border-radius:99px;background:var(--soft);white-space:nowrap}"
+    ".working{background:var(--accent);color:#fff}.waiting{background:#e3a72f;color:#000}"
+    "summary{cursor:pointer;padding:.55rem 0;border-top:1px solid var(--line);opacity:.8}"
+    "details.card>summary,.steps>summary{border:0;padding:0}"
+    "textarea,input,select{font:inherit;width:100%;padding:.6rem;margin:.3rem 0;border:1px solid var(--line);"
+    "border-radius:8px;background:Canvas;color:CanvasText}"
+    "button{font:inherit;font-weight:600;padding:.55rem 1.2rem;margin:.3rem 0;border:0;border-radius:8px;"
+    "background:var(--accent);color:#fff}button.quiet{background:var(--soft);color:inherit}"
+    ".you,.agent,.tool,.error{white-space:pre-wrap;overflow-wrap:anywhere}"
+    ".you{background:var(--soft);border-radius:12px;padding:.6rem .9rem;margin:1.4rem 0 1rem 2.5rem}"
+    ".agent{margin:1rem 0}.error{color:#d9463e;margin:1rem 0}"
+    ".steps{margin:.6rem 0;font-size:.85rem}.steps>summary{opacity:.6}"
+    ".tool{font:12px/1.5 ui-monospace,monospace;opacity:.7;padding:.2rem 0 0 1rem}"
+    "code{font:.85rem ui-monospace,monospace;overflow-wrap:anywhere}"};
 
 struct Request {
     std::string method;
@@ -89,12 +101,12 @@ auto parsed(std::string_view raw) -> Request
     return request;
 }
 
-auto page(std::string_view title, std::string_view body, std::string_view head = {}) -> std::string
+auto page(std::string_view title, std::string_view body, std::string_view above = {}, std::string_view head = {}) -> std::string
 {
     return std::format("<!doctype html><html lang=en><meta charset=utf-8>"
                        "<meta name=viewport content=\"width=device-width,initial-scale=1\">{3}"
-                       "<title>{0}</title><style>{1}</style><h1>{0}</h1>{2}</html>",
-                       escaped(title), stylesheet, body, head);
+                       "<title>{0}</title><style>{1}</style>{4}<h1>{0}</h1>{2}</html>",
+                       escaped(title), stylesheet, body, head, above);
 }
 
 auto response(std::string_view status, std::string_view body, std::string_view extra = {}) -> std::string
@@ -109,79 +121,89 @@ auto see(std::string_view where) -> std::string
     return response("303 See Other", "", std::format("Location: {}\r\n", where));
 }
 
+constexpr auto home = std::string_view{"<p class=muted><a href=\"/\">&larr; All projects</a></p>"};
+
 auto refused(std::string_view status, std::string_view why) -> std::string
 {
-    return response(status, page("Not done", std::format("<p class=error>{}</p><p><a href=\"/\">All projects</a></p>", escaped(why))));
+    return response(status, page("That did not happen", std::format("<p class=error>{}</p>", escaped(why)), home));
 }
 
-auto button(std::string_view action, std::string_view label) -> std::string
+auto status_words(std::string_view status) -> std::string_view
 {
-    return std::format("<form method=post action=\"{}\"><button>{}</button></form>", action, label);
+    return status == "waiting" ? "waiting for you" : status == "terminal" ? "in a terminal" : status;
 }
 
-auto session_list(std::vector<Session> const& all, std::string_view project) -> std::string
+auto row(Session const& session) -> std::string
 {
-    auto items = std::string{};
-    for (auto const& session : all) {
-        if (project.empty() || session.project == project) {
-            items += std::format("<li><a href=\"/session/{0}\"><b>{0}</b></a><small>{1}, started {2}</small>",
-                                 escaped(session.id), escaped(session.state), escaped(session.started));
+    return std::format("<a class=row href=\"/session/{}\"><span class=\"pill {}\">{}</span><span>{}<small>{}</small></span></a>",
+                       escaped(session.id), session.status, status_words(session.status), escaped(session.title), session.age);
+}
+
+// A project's sessions, newest first: the live ones in sight, the stopped ones folded away.
+auto session_rows(std::vector<Session> const& all, std::string_view project) -> std::string
+{
+    auto live = std::string{};
+    auto stopped = std::string{};
+    auto count = 0;
+    for (auto const& session : all | std::views::reverse) {
+        if (session.project == project) {
+            (session.status == "stopped" ? stopped : live) += row(session);
+            count += session.status == "stopped" ? 1 : 0;
         }
     }
-    return items.empty() ? "<p>None.</p>" : "<ul>" + items + "</ul>";
+    return count == 0 ? live : live + std::format("<details><summary>{} stopped</summary>{}</details>", count, stopped);
+}
+
+auto new_session(Project const& project) -> std::string
+{
+    return std::format("<form method=post action=\"/project/{}/run\"><textarea name=message rows=3 placeholder=\""
+                       "What should it do? Leave this empty and it does the next piece of work: {}\"></textarea>"
+                       "<button>Start</button></form>",
+                       escaped(project.name), escaped(project.next_title()));
 }
 
 auto board(Config const& config, bool const acts) -> std::string
 {
     auto const all = sessions(config);
-    auto body = std::string{"<h2>Projects</h2>"};
+    auto body = std::string{};
     if (auto const names = project_names(config); !names) {
         body += std::format("<p>{}</p>", escaped(names.error()));
-    } else if (names->empty()) {
-        body += "<p>None yet.</p>";
     } else {
-        body += "<ul>";
         for (auto const& name : *names) {
             auto const project = describe(config, name);
-            auto const running = std::ranges::count_if(all, [&](Session const& session) {
-                return session.project == name && session.state == "running";
-            });
-            body += std::format("<li><a href=\"/project/{0}\"><b>{0}</b></a> {1}<small>next: {2}</small>"
-                                "<small>last commit {3}{4}, {5} running</small>",
-                                escaped(name), escaped(project.description), escaped(project.next_title()),
-                                escaped(project.lastCommit), project.scaffoldOnly ? ", still the scaffold" : "", running);
+            body += std::format("<section class=card><h2><a href=\"/project/{0}\">{0}</a></h2><p class=muted>{1}</p>{2}",
+                                escaped(name), escaped(project.description), session_rows(all, name));
+            body += acts ? "<details><summary>New session</summary>" + new_session(project) + "</details>" : "";
+            body += "</section>";
         }
-        body += "</ul>";
     }
-    body += "<h2>Sessions</h2>" + session_list(all, {});
     if (acts) {
-        body += "<h2>A new project</h2><form method=post action=\"/init\">"
-                "<input name=name placeholder=\"name\" required pattern=\"[A-Za-z0-9][A-Za-z0-9_-]*\">"
-                "<input name=description placeholder=\"one line: what is it?\" required><select name=profile>";
+        body += "<details class=card><summary>New project</summary><form method=post action=\"/init\">"
+                "<input name=name placeholder=\"Name: letters, digits, dashes\" required pattern=\"[A-Za-z0-9][A-Za-z0-9_-]*\">"
+                "<input name=description placeholder=\"One line: what is it?\" required><select name=profile>";
         for (auto const profile : profiles()) {
             body += std::format("<option value=\"{}\">{}</option>", profile, escaped(profile_summary(profile)));
         }
-        body += "</select><textarea name=notes rows=3 placeholder=\"anything else on your mind\"></textarea>"
-                "<button>Create</button></form>";
+        body += "</select><textarea name=notes rows=3 placeholder=\"Anything else on your mind\"></textarea>"
+                "<button>Create</button></form></details>";
     }
-    return page("bot", body);
+    return page("Projects", body);
 }
 
 auto project_page(Config const& config, std::string const& name, bool const acts) -> std::string
 {
     auto const project = describe(config, name);
-    auto body = std::format("<p>{}</p><p><a href=\"/\">All projects</a></p>", escaped(project.description));
+    auto body = std::format("<p class=muted>{}</p>", escaped(project.description));
     if (acts) {
-        body += std::format("<h2>Start a session</h2><form method=post action=\"/project/{}/run\">"
-                            "<textarea name=message rows=4 placeholder=\"What should it do? Leave empty for the work marked next.\">"
-                            "</textarea><button>Start</button></form>",
-                            escaped(name));
+        body += "<section class=card><h2>New session</h2>" + new_session(project) + "</section>";
     }
-    body += "<h2>Work</h2><ul>";
+    body += "<section class=card><h2>Sessions</h2>" + session_rows(sessions(config), name) + "</section>"
+            "<section class=card><h2>Work</h2>";
     for (auto const& item : project.work) {
-        body += std::format("<li>{}{}<small>{}</small>", item.next ? "<b>next</b> " : "", escaped(item.title), escaped(item.file));
+        body += std::format("<div class=row><span>{}{}<small>{}</small></span></div>", item.next ? "<b>next</b> " : "",
+                            escaped(item.title), escaped(item.file));
     }
-    return page(name, body + "</ul><h2>Sessions</h2>" + session_list(sessions(config), name));
+    return page(name, body + "</section>", home);
 }
 
 // The conversation. While the agent works the page reloads itself and has no
@@ -189,37 +211,50 @@ auto project_page(Config const& config, std::string const& name, bool const acts
 // typing; `?write` is the same page standing still, for a message mid-turn.
 auto session_page(Config const& config, Session const& session, bool const acts, bool const writing) -> std::string
 {
-    auto const running = session.state == "running";
-    auto const conversation = takes_messages(config, session.id);
-    auto const said = conversation ? transcript(config, session.id) : Transcript{};
-    auto const working = running && said.working;
+    auto const working = session.status == "working";
     auto const address = "/session/" + escaped(session.id);
+    auto body = std::format("<p><span class=\"pill {}\">{}</span> <span class=muted>started {}</span></p>", session.status,
+                            status_words(session.status), session.age);
 
-    auto body = std::format("<p>{}, started {}. <a href=\"/project/{}\">{}</a></p>", escaped(session.state),
-                            escaped(session.started), escaped(session.project), escaped(session.project));
-    for (auto const& event : said.events) {
-        if (event.kind == "done") {
-            body += "<hr>";
-        } else if (event.kind == "you" || event.kind == "agent" || event.kind == "tool" || event.kind == "error") {
+    // What it said is shown; what it did on the way is folded into a count,
+    // open only for the steps it is in the middle of.
+    auto const events = takes_messages(config, session.id) ? transcript(config, session.id).events : std::vector<Event>{};
+    for (auto index = std::size_t{0}; index < events.size(); ++index) {
+        auto const& event = events[index];
+        if (event.kind == "tool") {
+            auto steps = std::string{};
+            auto count = 0;
+            for (; index < events.size() && events[index].kind == "tool"; ++index, ++count) {
+                steps += std::format("<div class=tool>{}</div>", escaped(events[index].text));
+            }
+            body += std::format("<details class=steps{}><summary>{} step{}</summary>{}</details>",
+                                working && index == events.size() ? " open" : "", count, count == 1 ? "" : "s", steps);
+            --index;
+        } else if (event.kind == "you" || event.kind == "agent" || event.kind == "error") {
             body += std::format("<div class={}>{}</div>", event.kind, escaped(event.text));
         }
     }
-    if (!conversation) {
-        body += std::format("<p>Attended in a terminal: <code>bot attach {}</code></p>", escaped(session.id));
+
+    if (session.status == "terminal") {
+        body += std::format("<p>This one is in a terminal: <code>bot attach {}</code></p>", escaped(session.project));
     } else if (working && !writing) {
-        body += std::format("<p id=end>Working. <a href=\"{}?write\">Write to it now</a></p>", address);
-    } else if (running && acts) {
-        body += std::format("<form method=post action=\"{}/say\"><textarea name=message rows=4 required></textarea>"
-                            "<button>Send</button></form>",
+        body += std::format("<p id=end class=muted>Working&hellip; <a href=\"{}?write\"><u>write to it anyway</u></a></p>", address);
+    } else if (session.status != "stopped" && acts) {
+        body += std::format("<form id=end method=post action=\"{}/say\"><textarea name=message rows=3 required "
+                            "placeholder=\"Reply\"></textarea><button>Send</button></form>",
                             address);
     }
-    if (acts) {
-        body += running ? button(address + "/stop", "Stop and publish its branch")
-                        : std::format("<p>Its work is the branch <code>{}</code>.</p>", escaped(session.id))
-                              + button(address + "/rm", "Remove this session");
+    if (acts && session.status != "stopped") {
+        body += std::format("<form method=post action=\"{}/stop\"><button class=quiet>Stop and keep its work</button></form>", address);
+    } else if (acts) {
+        body += std::format("<p class=muted>Stopped. Its work is the branch <code>{}</code>.</p><form method=post "
+                            "action=\"{}/rm\"><button class=quiet>Remove this session</button></form>",
+                            escaped(session.id), address);
     }
     // Each reload lands at the end, where the newest words are.
-    return page(session.id, body,
+    return page(session.title, body,
+                std::format("<p class=muted><a href=\"/\">&larr; All projects</a> / <a href=\"/project/{0}\">{0}</a></p>",
+                            escaped(session.project)),
                 working && !writing ? std::format("<meta http-equiv=refresh content=\"5;url={}#end\">", address) : "");
 }
 
@@ -227,9 +262,6 @@ auto session_page(Config const& config, Session const& session, bool const acts,
 // address is the one thing about a request its sender cannot choose.
 auto is_owner(Config const& config, std::string_view remote) -> bool
 {
-    if (remote.starts_with("::ffff:")) {
-        remote.remove_prefix(7);
-    }
     if (config.whois.empty() || !is_address(remote)) {
         return false;
     }
@@ -267,7 +299,7 @@ auto act(Config const& config, Request const& request) -> std::string
         return found != request.form.end() ? found->second : std::string{};
     };
     auto const outcome = [](std::expected<std::string, std::string> const& result) {
-        return result ? response("200 OK", page("Done", std::format("<p>{}</p><p><a href=\"/\">All projects</a></p>", escaped(*result))))
+        return result ? response("200 OK", page("Done", std::format("<p>{}</p>", escaped(*result)), home))
                       : refused("400 Bad Request", result.error());
     };
     auto const& path = request.path;
@@ -347,7 +379,7 @@ auto respond(Config const& config, std::string_view raw, std::string_view remote
             return response("200 OK", session_page(config, *found, acts, request.query == "write"));
         }
     }
-    return response("404 Not Found", page("Not here", "<p><a href=\"/\">All projects</a></p>"));
+    return response("404 Not Found", page("Not here", "", home));
 }
 
 }

@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cerrno>
-#include <csignal>
 #include <cstring>
 #include <format>
 

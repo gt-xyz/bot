@@ -15,8 +15,9 @@ namespace bot {
 struct Session {
     std::string id;
     std::string project;
-    std::string started;
-    std::string state;
+    std::string title;  // its first message, or that it is in a terminal
+    std::string status; // working, waiting, terminal or stopped
+    std::string age;    // how long ago it started, in words
 };
 
 auto sessions(Config const& config) -> std::vector<Session>;

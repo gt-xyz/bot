@@ -119,7 +119,7 @@ auto command_ls(bot::Config const& config) -> int
         std::cerr << names.error() << '\n';
     }
     for (auto const& session : all) {
-        std::cout << std::format("  {:<40} {:<10} started {}\n", session.id, session.state, session.started);
+        std::cout << std::format("  {:<10} {:<12} {}  ({})\n", session.status, session.age, session.title, session.id);
     }
     return 0;
 }

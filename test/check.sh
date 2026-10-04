@@ -188,7 +188,7 @@ expect_contains "$session/proxy/tinyproxy.conf" "FilterDefaultDeny Yes"
 listing="$("$bot" ls)"
 expect_text "$listing" "Shape v0.1" "ls: the next piece of work is not shown"
 expect_text "$listing" "$id" "ls: a session is not shown"
-expect_text "$listing" "running" "ls: a session's state is not shown"
+expect_text "$listing" "terminal" "ls: a session's status is not shown"
 
 front="$(printf 'GET / HTTP/1.1\r\n\r\n' | "$bot" serve)"
 expect_text "$front" "HTTP/1.0 200" "serve: the board is not served"

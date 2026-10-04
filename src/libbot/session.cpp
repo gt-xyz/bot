@@ -259,6 +259,36 @@ auto project_of(std::string const& id) -> std::string
     return id.substr(0, id.size() - stampLength - 1);
 }
 
+// A title is the start of the first message, cut where a character ends.
+auto shortened(std::string const& text) -> std::string
+{
+    auto end = std::size_t{72};
+    if (text.size() <= end) {
+        return text;
+    }
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return text.substr(0, end) + "…";
+}
+
+auto ago(std::string const& at) -> std::string
+{
+    auto const part = [&at](std::size_t from, std::size_t length) { return std::atoi(at.substr(from, length).c_str()); };
+    auto when = std::tm{};
+    when.tm_year = part(0, 4) - 1900;
+    when.tm_mon = part(4, 2) - 1;
+    when.tm_mday = part(6, 2);
+    when.tm_hour = part(9, 2);
+    when.tm_min = part(11, 2);
+    when.tm_isdst = -1;
+    auto const minutes = static_cast<long>(std::difftime(std::time(nullptr), std::mktime(&when)) / 60);
+    return minutes < 1 ? "just now"
+         : minutes < 90 ? std::format("{} min ago", minutes)
+         : minutes < 36 * 60 ? std::format("{} h ago", minutes / 60)
+                             : std::format("{} days ago", minutes / 1440);
+}
+
 // The first words a session hears when its owner gave it none.
 constexpr auto nextWork = "Read AGENTS.md, then do the piece of work marked next. Commit what you do.";
 
@@ -292,13 +322,17 @@ auto sessions(Config const& config) -> std::vector<Session>
         if (!is_session(config, id)) {
             continue;
         }
-        auto const at = id.substr(id.size() - stampLength);
         auto const state = states.find(container(id));
+        auto const running = state != states.end() && state->second == "running";
+        auto const conversation = takes_messages(config, id);
+        auto first = std::string{};
+        std::getline(std::ifstream{entry.path() / "inbox" / "0001"}, first);
         result.push_back(Session{
             id,
             project_of(id),
-            std::format("{}-{}-{} {}:{}", at.substr(0, 4), at.substr(4, 2), at.substr(6, 2), at.substr(9, 2), at.substr(11, 2)),
-            state != states.end() ? state->second : "gone",
+            conversation ? shortened(first) : "In a terminal",
+            !running ? "stopped" : !conversation ? "terminal" : transcript(config, id).working ? "working" : "waiting",
+            ago(id.substr(id.size() - stampLength)),
         });
     }
     std::ranges::sort(result, {}, &Session::id);
