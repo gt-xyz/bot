@@ -76,6 +76,7 @@ through that one key, which is what lets the checks stand a script in its place.
     remote-host  ssh destination, if they are on another machine    (optional)
     agent        the command a session runs
     agent-env    file of NAME=value lines for the agent's credential (optional)
+    agent-home   directory copied into each session's home           (optional)
     allow        host names a session may reach, separated by spaces (optional)
     runtime      container runtime; `podman` unless set              (optional)
     templates    template tree, if not the installed one             (optional)
@@ -95,7 +96,7 @@ contains an address, and that no scaffolded project does either.
 and the time:
 
     tree/     a fresh clone, on a branch named after the session, with no remote
-    home/     the agent's home, empty to begin with
+    home/     the agent's home: a copy of `agent-home`, or empty
     proxy/    the proxy's configuration and the names it will connect to
     log       what the session printed
 

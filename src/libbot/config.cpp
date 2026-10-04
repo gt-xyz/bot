@@ -117,6 +117,8 @@ auto load_config(std::filesystem::path const& path) -> std::expected<Config, std
             config.agent = words(value);
         } else if (key == "agent-env") {
             config.agentEnv = expanded(value);
+        } else if (key == "agent-home") {
+            config.agentHome = expanded(value);
         } else if (key == "allow") {
             config.allow = words(value);
         } else {

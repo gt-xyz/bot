@@ -41,6 +41,12 @@ readable by you alone. It is passed to a session's environment and to nothing
 else. Git on the host needs a `user.name` and `user.email`; a session commits
 as them.
 
+A session's home is new each time, so an agent that asks questions on its
+first start asks them in every session. `agent-home` names a directory whose
+contents are copied into each session's home before it starts: put the agent's
+settings there, answered once. It is copied, not mounted, and a session can
+read all of it, so it is no place for anything a session should not have.
+
 `allow` is everything a session can reach. Start with the one name the agent
 needs. If the agent then fails to connect, the proxy's own log names what it
 refused: `podman logs bot-<session>-proxy`.

@@ -132,8 +132,11 @@ images      = $root/images
 runtime     = $workspace/runtime
 agent       = an-agent --flag
 agent-env   = $HOME/.config/bot/agent.env
+agent-home  = $HOME/.config/bot/agent-home
 allow       = model.example
 CONFIG
+mkdir -p "$HOME/.config/bot/agent-home/.agent"
+echo "seeded" >"$HOME/.config/bot/agent-home/.agent/settings"
 echo "TOKEN=secret" >"$HOME/.config/bot/agent.env"
 
 printf 'a demo project\n3\na note\n\n' | "$bot" init demo >/dev/null 2>&1 || fail "init: did not create a project"
@@ -164,6 +167,10 @@ for never in sock --privileged host --device --cap-add --publish; do
   expect_absent_text "$given" "$never" "up: a session's command line mentions $never"
 done
 expect_text "$(cat "$asked")" "network create --internal --disable-dns bot-$id" "up: a session's network is not internal and without a resolver"
+
+# The agent's home starts as a copy of what its owner prepared, not a mount of it.
+[ "$(cat "$session/home/.agent/settings" 2>/dev/null)" = "seeded" ] || fail "up: the session's home was not seeded"
+[ -L "$session/home/.agent/settings" ] && fail "up: the session's home links back to the owner's"
 
 # The proxy stands on both networks, mounts only its two files, read-only,
 # and those files hold the allowed names and no others.

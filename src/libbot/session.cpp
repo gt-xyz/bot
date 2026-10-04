@@ -331,6 +331,15 @@ auto up(Config const& config, std::string const& project) -> std::expected<std::
         }
     }
 
+    // What the agent should find in its home on a first start, such as its
+    // settings. Copied, never mounted: a session cannot write back to it.
+    if (prepared && !config.agentHome.empty()) {
+        std::filesystem::copy(config.agentHome, directory / "home", std::filesystem::copy_options::recursive, error);
+        if (error) {
+            prepared = std::unexpected(std::format("cannot copy {}: {}", config.agentHome.string(), error.message()));
+        }
+    }
+
     auto const started = prepared ? start(config, id, true, config.agent)
                                   : std::expected<void, std::string>{std::unexpected(prepared.error())};
     if (!started) {

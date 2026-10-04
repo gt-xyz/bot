@@ -19,6 +19,7 @@ struct Config {
     std::string runtime = "podman";
     std::vector<std::string> agent;
     std::filesystem::path agentEnv;
+    std::filesystem::path agentHome;
     std::vector<std::string> allow;
 
     auto remote_is_local() const -> bool { return remoteHost.empty(); }
