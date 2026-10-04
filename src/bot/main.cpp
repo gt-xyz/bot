@@ -15,6 +15,7 @@
 #include <sstream>
 #include <vector>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -145,8 +146,21 @@ auto command_serve(bot::Config const& config) -> int
             wanted = head + 4 + (length == std::string::npos ? 0 : std::strtoul(lowered.c_str() + length + 15, nullptr, 10));
         }
     }
-    auto const* remote = std::getenv("REMOTE_ADDR");
-    std::cout << bot::respond(config, request, remote != nullptr ? remote : "") << std::flush;
+    auto const* address = std::getenv("REMOTE_ADDR");
+    auto const remote = std::string{address != nullptr ? address : ""};
+    if (bot::stream(config, request, remote, std::cout)) {
+        return 0;
+    }
+    auto launching = std::string{};
+    std::cout << bot::respond(config, request, remote, &launching) << std::flush;
+    if (!launching.empty()) {
+        // The browser has its answer. Let go of the connection before the slow
+        // half, so that nothing started here can hold it open.
+        auto const nowhere = ::open("/dev/null", O_RDWR);
+        ::dup2(nowhere, STDIN_FILENO);
+        ::dup2(nowhere, STDOUT_FILENO);
+        (void)bot::launch(config, launching);
+    }
     return 0;
 }
 

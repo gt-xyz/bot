@@ -117,7 +117,8 @@ case "$1 ${2:-}" in
   "info --format") if [ -n "${BOT_CONTAINS:-}" ]; then echo true; else echo false; fi ;;
   "ps --all") if [ "$4" = "{{.Names}}" ]; then cut -d' ' -f1 "$BOT_RUNNING"; else cat "$BOT_RUNNING"; fi ;;
   "inspect --format") case "$3" in *Mounts*) [ -n "${BOT_CONTAINS:-}" ] || echo "$HOME" ;; *) echo proxy.invalid ;; esac ;;
-  "exec "*) [ -z "${BOT_CONTAINS:-}" ] || exit 0; shift 2; HTTPS_PROXY=http://proxy.invalid:8888 exec "$@" ;;
+  "exec "*) [ -z "${BOT_CONTAINS:-}" ] || { for probe in $(seq 0 99); do echo "held $probe"; done; exit 0; }
+            shift 2; HTTPS_PROXY=http://proxy.invalid:8888 exec "$@" ;;
 esac
 exit 0
 RUNTIME
@@ -192,9 +193,13 @@ expect_text "$listing" "terminal" "ls: a session's status is not shown"
 
 front="$(printf 'GET / HTTP/1.1\r\n\r\n' | "$bot" serve)"
 expect_text "$front" "HTTP/1.0 200" "serve: the board is not served"
-expect_text "$front" "a demo project" "serve: a project's description is not shown"
+expect_text "$front" 'href="/project/demo"' "serve: a project is not shown"
+expect_text "$front" "script-src 'nonce-" "serve: a page does not say which script may run"
+expect_absent_text "$front" "unsafe-inline" "serve: a page lets any inline script or style run"
 expect_text "$front" "$id" "serve: a session is not shown"
-expect_text "$(printf 'GET /project/demo HTTP/1.1\r\n\r\n' | "$bot" serve)" "<b>next</b> Shape v0.1" "serve: a project's work is not shown"
+demo_page="$(printf 'GET /project/demo HTTP/1.1\r\n\r\n' | "$bot" serve)"
+expect_text "$demo_page" "<b>next</b> Shape v0.1" "serve: a project's work is not shown"
+expect_text "$demo_page" "a demo project" "serve: a project's description is not shown"
 expect_text "$(printf 'POST / HTTP/1.1\r\n\r\n' | "$bot" serve)" "HTTP/1.0 405" "serve: something other than a read was answered"
 
 # `bot check` must fail on a runtime that contains nothing, and say what leaked.
@@ -320,18 +325,36 @@ expect_text "$(post fd00::1 "/session/$talking/say" "message=once+more%21")" "Lo
 [ "$(cat "$talk/inbox/0003" 2>/dev/null)" = "once more!" ] || fail "serve: the owner's message is not in the inbox as written"
 
 working="$(get fd00::1 "/session/$talking")"
-expect_text "$working" "http-equiv=refresh" "serve: a working session's page does not reload"
-expect_absent_text "$working" "<textarea" "serve: a working session's page has a form a reload would empty"
-expect_text "$(get fd00::1 "/session/$talking?write")" "<textarea" "serve: there is no way to write to a working session"
+expect_text "$working" "<noscript><meta http-equiv=refresh" "serve: without the script, a working session's page does not reload"
+expect_text "$working" "<script nonce=" "serve: a live session's page has no script to keep it current"
+
+# The stream the script listens to: each event once, then the status. It ends
+# by itself once the session has stopped, and is nobody's but the owner's.
+: >"$BOT_RUNNING"
+live="$(get fd00::1 "/session/$talking/stream?after=1")"
+expect_text "$live" "Content-Type: text/event-stream" "stream: it is not an event stream"
+expect_text "$live" "data: <div class=agent>Looking at &lt;the&gt; files.</div>" "stream: an event did not arrive as the page would show it"
+expect_absent_text "$live" "<div class=you>do the thing" "stream: an event the page already had was sent again"
+expect_text "$live" "data: stopped" "stream: the status did not arrive"
+expect_text "$(get fd00::9 "/session/$talking/stream")" "HTTP/1.0 403" "stream: someone else could listen"
+echo "bot-$talking running" >"$BOT_RUNNING"
 
 started="$(post fd00::1 /project/demo/run "message=from+the+web")"
 expect_text "$started" "303 See Other" "serve: the owner could not start a session"
 [ "$(cat "$sessions"/demo-*/inbox/0001 | grep -c 'from the web')" -eq 1 ] || fail "serve: the session started from the web has no first message"
-expect_text "$(post fd00::1 "/session/$talking/stop" "")" "nothing committed beyond main" "serve: stopping did not say what was published"
+expect_text "$(post fd00::1 "/session/$talking/stop" "")" "Location: /session/$talking" "serve: the owner could not stop a session"
 expect_text "$(post fd00::1 /init "name=fromweb&description=made+from+the+web&profile=none")" "Location: /project/fromweb" \
   "serve: the owner could not create a project"
 git --git-dir "$workspace/remotes/fromweb.git" cat-file -e main:AGENTS.md 2>/dev/null || fail "serve: the project made from the web has no scaffold"
 unset BOT_CONTAINS
+
+# Started from the web where the check fails: the answer still comes at once,
+# nothing runs, and the session's own page says why.
+sleep 1
+refused="$(post fd00::1 /project/demo/run "message=should+not+run" | sed -n 's|^Location: /session/||p' | tr -d '\r')"
+[ -n "$refused" ] || fail "serve: starting where the check fails gave no session to look at"
+expect_text "$(get fd00::1 "/session/$refused")" "is not contained on this machine" "serve: a session that was not started does not say why"
+grep -qE "^run --detach --name bot-$refused " "$asked" && fail "serve: a session was started on a machine that failed the check"
 
 # Nothing tracked here may name a machine, an account or an address.
 if git -C "$root" grep -nIE '[0-9]{1,3}(\.[0-9]{1,3}){3}' -- . >/dev/null 2>&1; then
@@ -346,7 +369,7 @@ expect_absent "$root" CLAUDE.md
 expect_contains "$root/README.md" "docs/PROJECT.md"
 
 # Scope is a budget. Raise it only in a commit that says why.
-budget=2100
+budget=2400
 lines="$(cat "$root"/src/libbot/* "$root"/src/bot/* | wc -l)"
 [ "$lines" -le "$budget" ] || fail "the library and the command are $lines lines, over the budget of $budget"
 

@@ -158,9 +158,20 @@ With no `owner` it answers `GET` and nothing else. With one, it acts, and so:
   this machine's host name or an address. A page somewhere else cannot press
   the buttons, and neither can a name somewhere else that resolves here.
 
-A session's page reloads itself while a turn is under way and has no form
-then, because a reload would empty it; `?write` is the same page standing
-still.
+Starting a session from the web answers at once: the clone is made and the
+message taken, the browser is sent to the session's page, and only then does
+the same process run `bot check` and start the agent. Until the runtime has
+heard of it, the session is `starting`. If it could not be started, the reason
+is written as its log, so its page says why.
+
+There is one script, inline in a session's page. It listens to
+`/session/<id>/stream`, which sends each new event as the page would show it
+and the session's status when it changes, and it sends a message without
+leaving the page. The stream is one `bot serve` process per listener for as
+long as they listen. Every response carries a policy naming a value made for
+that response, and the browser runs only the script and stylesheet that carry
+it, so text from a session can never become code in the page even if escaping
+it were ever to fail. Without the script, a working session's page reloads.
 
 ## Project names
 

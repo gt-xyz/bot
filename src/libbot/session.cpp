@@ -194,11 +194,15 @@ auto start(Config const& config, std::string const& id, bool const terminal, std
     return {};
 }
 
+auto teardown(Config const& config, std::string const& id) -> void
+{
+    (void)run({config.runtime, "rm", "--force", "--time", "0", container(id), proxy(id)});
+    (void)run({config.runtime, "network", "rm", container(id)});
+}
+
 auto discard(Config const& config, std::string const& id) -> std::expected<void, std::string>
 {
-    (void)run({config.runtime, "rm", "--force", container(id)});
-    (void)run({config.runtime, "rm", "--force", proxy(id)});
-    (void)run({config.runtime, "network", "rm", container(id)});
+    teardown(config, id);
     auto error = std::error_code{};
     std::filesystem::remove_all(session_directory(config, id), error);
     if (error) {
@@ -331,7 +335,9 @@ auto sessions(Config const& config) -> std::vector<Session>
             id,
             project_of(id),
             conversation ? shortened(first) : "In a terminal",
-            !running ? "stopped" : !conversation ? "terminal" : transcript(config, id).working ? "working" : "waiting",
+            running ? (!conversation ? "terminal" : transcript(config, id).working ? "working" : "waiting")
+                    // Opened and not yet started: it has messages, and the runtime has never heard of it.
+                    : conversation && state == states.end() && !std::filesystem::exists(entry.path() / "log") ? "starting" : "stopped",
             ago(id.substr(id.size() - stampLength)),
         });
     }
@@ -405,17 +411,9 @@ auto up(Config const& config, std::string const& project) -> std::expected<std::
     return id ? begin(config, *id, true, config.agent) : id;
 }
 
-auto run_session(Config const& config, std::string const& project, std::string const& message)
+auto open_session(Config const& config, std::string const& project, std::string const& message)
     -> std::expected<std::string, std::string>
 {
-    auto report = std::ostringstream{};
-    if (!check(config, {}, report)) {
-        auto failed = std::string{"a session is not contained on this machine, so none was started"};
-        for (auto const& line : lines(report.str())) {
-            failed += line.starts_with("FAIL") ? "\n" + line : std::string{};
-        }
-        return std::unexpected(failed);
-    }
     auto const id = prepare(config, project);
     if (!id) {
         return id;
@@ -425,8 +423,46 @@ auto run_session(Config const& config, std::string const& project, std::string c
         (void)discard(config, *id);
         return std::unexpected(said.error());
     }
-    // The image's adapter: one turn of its agent for each message in the inbox.
-    return begin(config, *id, false, {"agent-loop"});
+    return id;
+}
+
+auto launch(Config const& config, std::string const& id) -> std::expected<void, std::string>
+{
+    auto report = std::ostringstream{};
+    auto started = std::expected<void, std::string>{};
+    if (!check(config, {}, report)) {
+        auto failed = std::string{"a session is not contained on this machine, so none was started"};
+        for (auto const& line : lines(report.str())) {
+            failed += line.starts_with("FAIL") ? "\n" + line : std::string{};
+        }
+        started = std::unexpected(failed);
+    } else {
+        // The image's adapter: one turn of its agent for each message in the inbox.
+        started = start(config, id, false, {"agent-loop"});
+    }
+    if (!started) {
+        // Why it did not start is the first and last thing in its log.
+        teardown(config, id);
+        auto log = std::ofstream{session_directory(config, id) / "log"};
+        for (auto const& line : lines("\x1e" "error\n" + started.error())) {
+            log << "- stdout F " << line << '\n';
+        }
+    }
+    return started;
+}
+
+auto run_session(Config const& config, std::string const& project, std::string const& message)
+    -> std::expected<std::string, std::string>
+{
+    auto const id = open_session(config, project, message);
+    if (!id) {
+        return id;
+    }
+    if (auto const started = launch(config, *id); !started) {
+        (void)discard(config, *id);
+        return std::unexpected(started.error());
+    }
+    return id;
 }
 
 auto resolve(Config const& config, std::string const& name) -> std::expected<std::string, std::string>
@@ -536,8 +572,8 @@ auto stop(Config const& config, std::string const& id) -> std::expected<std::str
     if (!is_session(config, id)) {
         return std::unexpected(std::format("no session named {}", id));
     }
-    (void)run({config.runtime, "stop", container(id)});
-    (void)run({config.runtime, "rm", "--force", proxy(id)});
+    (void)run({config.runtime, "stop", "--time", "2", container(id)});
+    (void)run({config.runtime, "rm", "--force", "--time", "0", proxy(id)});
     return publish(config, id, project_of(id));
 }
 
@@ -616,43 +652,50 @@ auto check(Config const& config, std::vector<std::string> const& addresses, std:
         say(false, "the runtime lists its containers");
     }
 
-    // Each script exits zero when the boundary held.
-    auto const inside = [&](std::string const& script) {
-        return runtime_says_yes(config, {"exec", container(id), "sh", "-c", script});
-    };
-    auto const hidden = [&](std::filesystem::path const& path) { return inside("! test -e " + quoted(path.string())); };
-    auto const relay = [&](std::string const& host, std::string_view const expected) {
-        return inside(std::format("test \"$(curl -s -o /dev/null -m 10 -w '%{{http_connect}}' https://{}/)\" = {}", host, expected));
+    // Each probe is a script that exits zero when the boundary held. They
+    // are run inside the session in one visit, each answering for itself.
+    auto probes = std::vector<std::pair<std::string, std::string>>{};
+    auto const probe = [&](std::string script, std::string what) { probes.emplace_back(std::move(what), std::move(script)); };
+    auto const hidden = [](std::filesystem::path const& path) { return "! test -e " + quoted(path.string()); };
+    auto const relay = [](std::string const& host, std::string_view const expected) {
+        return std::format("test \"$(curl -s -o /dev/null -m 10 -w '%{{http_connect}}' https://{}/)\" = {}", host, expected);
     };
 
-    say(inside("test \"$(id -u)\" != 0"), "a session is not root");
-    say(inside("grep -Eq '^CapEff:[[:space:]]*0+$' /proc/self/status"), "a session holds no capabilities");
-    say(inside("grep -Eq '^[^ ]+ / [^ ]+ ro[, ]' /proc/mounts"), "a session's root filesystem is read-only");
-    say(inside("! test -w /inbox"), "a session cannot write where its messages arrive");
-    say(hidden(sentinel), "a session cannot see the directory that holds the other sessions");
-    say(hidden(default_config_path()), "a session cannot see this tool's configuration");
+    probe("test \"$(id -u)\" != 0", "a session is not root");
+    probe("grep -Eq '^CapEff:[[:space:]]*0+$' /proc/self/status", "a session holds no capabilities");
+    probe("grep -Eq '^[^ ]+ / [^ ]+ ro[, ]' /proc/mounts", "a session's root filesystem is read-only");
+    probe("! test -w /inbox", "a session cannot write where its messages arrive");
+    probe(hidden(sentinel), "a session cannot see the directory that holds the other sessions");
+    probe(hidden(default_config_path()), "a session cannot see this tool's configuration");
     if (!config.agentEnv.empty()) {
-        say(hidden(config.agentEnv), "a session cannot see the file its agent's credential came from");
+        probe(hidden(config.agentEnv), "a session cannot see the file its agent's credential came from");
     }
     if (auto const* home = std::getenv("HOME"); home != nullptr) {
-        say(inside("! ls -A " + quoted(home) + " 2>/dev/null | grep -q ."), "a session cannot see the owner's home directory");
+        probe("! ls -A " + quoted(home) + " 2>/dev/null | grep -q .", "a session cannot see the owner's home directory");
     }
-    say(inside("! ls /run/podman /run/docker.sock /var/run/docker.sock /run/user/*/podman 2>/dev/null | grep -q ."),
-        "a session cannot see a container runtime's socket");
-
-    say(inside("! grep -Eq '^[^[:space:]]+[[:space:]]+00000000[[:space:]]' /proc/net/route"), "a session has no default route");
-    say(inside("! timeout 8 getent hosts example.org"), "a session cannot resolve a name itself");
+    probe("! ls /run/podman /run/docker.sock /var/run/docker.sock /run/user/*/podman 2>/dev/null | grep -q .",
+          "a session cannot see a container runtime's socket");
+    probe("! grep -Eq '^[^[:space:]]+[[:space:]]+00000000[[:space:]]' /proc/net/route", "a session has no default route");
+    probe("! timeout 8 getent hosts example.org", "a session cannot resolve a name itself");
     for (auto const& address : unreachable) {
-        say(inside(std::format("out=$(timeout 4 bash -c ': </dev/tcp/{}/22' 2>&1); test $? -ne 0 && ! printf %s \"$out\" | grep -qi refused",
-                               address)),
-            "a session cannot connect to " + address);
-        say(relay(address.contains(':') ? "[" + address + "]" : address, "403"), "the proxy refuses to relay to " + address);
+        probe(std::format("out=$(timeout 4 bash -c ': </dev/tcp/{}/22' 2>&1); test $? -ne 0 && ! printf %s \"$out\" | grep -qi refused", address),
+              "a session cannot connect to " + address);
+        probe(relay(address.contains(':') ? "[" + address + "]" : address, "403"), "the proxy refuses to relay to " + address);
     }
     if (!std::ranges::contains(config.allow, "example.org")) {
-        say(relay("example.org", "403"), "the proxy refuses a name that is not allowed");
+        probe(relay("example.org", "403"), "the proxy refuses a name that is not allowed");
     }
     for (auto const& name : config.allow) {
-        say(relay(name, "200"), "the proxy relays to " + name + ", which is allowed");
+        probe(relay(name, "200"), "the proxy relays to " + name + ", which is allowed");
+    }
+
+    auto script = std::string{};
+    for (auto index = std::size_t{0}; index < probes.size(); ++index) {
+        script += std::format("( {} ) >/dev/null 2>&1 && echo held {}\n", probes[index].second, index);
+    }
+    auto const answers = run({config.runtime, "exec", container(id), "sh", "-c", script});
+    for (auto index = std::size_t{0}; index < probes.size(); ++index) {
+        say(answers && ("\n" + answers->output).contains(std::format("\nheld {}\n", index)), probes[index].first);
     }
 
     say(discard(config, id).has_value(), "the probe session is removed");

@@ -16,7 +16,7 @@ struct Session {
     std::string id;
     std::string project;
     std::string title;  // its first message, or that it is in a terminal
-    std::string status; // working, waiting, terminal or stopped
+    std::string status; // starting, working, waiting, terminal or stopped
     std::string age;    // how long ago it started, in words
 };
 
@@ -36,6 +36,13 @@ auto resolve(Config const& config, std::string const& name) -> std::expected<std
 // a machine that does not contain it.
 auto run_session(Config const& config, std::string const& project, std::string const& message)
     -> std::expected<std::string, std::string>;
+
+// Its two halves, for a face that must answer before the slow one. The first
+// makes the clone and takes the message. The second proves containment and
+// starts the agent; if it cannot, the reason becomes the session's log.
+auto open_session(Config const& config, std::string const& project, std::string const& message)
+    -> std::expected<std::string, std::string>;
+auto launch(Config const& config, std::string const& id) -> std::expected<void, std::string>;
 
 auto takes_messages(Config const& config, std::string const& id) -> bool;
 auto say(Config const& config, std::string const& id, std::string const& message) -> std::expected<void, std::string>;

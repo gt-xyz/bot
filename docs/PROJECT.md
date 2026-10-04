@@ -20,8 +20,11 @@ an intention that decays. The work notes are the whole scope.
   daemon, no queue, no plugin system.
 - One adapter, the hosted model's CLI, until a second provider is actually
   wanted. The seam (0013) exists; the second adapter does not.
-- No JavaScript in the web face. A web terminal and a push relay are existing
-  tools run beside it, never code here.
+- One script in the web face, written here and small enough to read: no
+  framework, no build step, nothing loaded from anywhere else, and a policy
+  header under which the browser runs nothing but it. The pages work without
+  it. A web terminal and a push relay are existing tools run beside it, never
+  code here.
 - A line budget on the library and the server, enforced by `test/check.sh`,
   raised only by a commit that says why.
 
