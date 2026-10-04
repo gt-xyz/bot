@@ -2,6 +2,7 @@
 #include "libbot/config.hpp"
 #include "libbot/project.hpp"
 #include "libbot/render.hpp"
+#include "libbot/session.hpp"
 #include "libbot/web.hpp"
 
 #include <cstdlib>
@@ -121,12 +122,64 @@ auto the_web_face_reads_and_does_nothing_else() -> void
     config.sessions = "/nonexistent";
     config.remoteRoot = "/nonexistent";
     config.runtime = "a-command-that-does-not-exist";
-    check(bot::respond(config, "POST / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 405"), "anything but GET is refused");
+    check(bot::respond(config, "POST / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 405"),
+          "with no owner named, anything but GET is refused");
     check(bot::respond(config, "").starts_with("HTTP/1.0 405"), "an empty request is refused");
     check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 200"), "the board is served");
     check(bot::respond(config, "GET /project/../etc HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 404"),
           "a project that does not exist is not found");
     check(bot::escaped("<script>&\"") == "&lt;script&gt;&amp;&quot;", "text is escaped before it reaches a page");
+}
+
+// With an owner named the face acts, so every request has to be the owner's,
+// and a form has to have come from the face's own page.
+auto the_web_face_acts_only_for_its_owner() -> void
+{
+    auto config = bot::Config{};
+    config.sessions = "/nonexistent";
+    config.remoteRoot = "/nonexistent";
+    config.runtime = "a-command-that-does-not-exist";
+    config.owner = "owner";
+    config.whois = {"sh", "-c", "test \"$1\" = fd00::1 && echo owner || echo someone-else", "whois"};
+    auto const form = [](std::string_view origin) {
+        return std::format("POST /session/x/say HTTP/1.1\r\nHost: [fd00::2]:80\r\nOrigin: {}\r\nContent-Length: 9\r\n\r\nmessage=a", origin);
+    };
+
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::1").starts_with("HTTP/1.0 200"), "the owner may read");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::9").starts_with("HTTP/1.0 403"), "someone else may not read");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "").starts_with("HTTP/1.0 403"), "a request from nowhere is refused");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::1; echo owner").starts_with("HTTP/1.0 403"),
+          "an address that is not one never reaches the command");
+    check(bot::respond(config, form("http://[fd00::2]:80"), "fd00::9").starts_with("HTTP/1.0 403"), "someone else may not act");
+    check(bot::respond(config, form("http://elsewhere.example"), "fd00::1").starts_with("HTTP/1.0 403"),
+          "a form sent by another site's page is refused");
+    check(bot::respond(config, "POST /session/x/say HTTP/1.1\r\nHost: fd00::2\r\n\r\nmessage=a", "fd00::1").starts_with("HTTP/1.0 403"),
+          "a form that does not say where it came from is refused");
+    check(bot::respond(config, std::string{"POST /session/x/say HTTP/1.1\r\nHost: name.example\r\nOrigin: http://name.example\r\n\r\n"}, "fd00::1")
+              .starts_with("HTTP/1.0 403"),
+          "a form addressed to a name that is not this machine's is refused");
+    check(bot::respond(config, form("http://[fd00::2]:80"), "fd00::1").starts_with("HTTP/1.0 400"),
+          "the owner's own form is acted on, and fails only because there is no such session");
+}
+
+// The log as the runtime writes it, carrying the adapter's records.
+auto a_transcript_is_read_from_the_log() -> void
+{
+    auto const log = std::string{"2026-01-01T00:00:00Z stdout F \x1eyou\n"
+                                 "2026-01-01T00:00:00Z stdout F do the work\n"
+                                 "2026-01-01T00:00:01Z stdout F \x1e" "agent\n"
+                                 "2026-01-01T00:00:01Z stdout P first half, \n"
+                                 "2026-01-01T00:00:01Z stdout F second half\n"
+                                 "2026-01-01T00:00:01Z stdout F and a second line\n"
+                                 "2026-01-01T00:00:02Z stdout F \x1e" "done\n"
+                                 "2026-01-01T00:00:02Z stdout F \n"};
+    auto const events = bot::events_in(log);
+    check(events.size() == 3, "each record is one event");
+    check(events.size() == 3 && events[0].kind == "you" && events[0].text == "do the work", "a message is read back");
+    check(events.size() == 3 && events[1].text == "first half, second half\nand a second line",
+          "a line the runtime split is joined, and separate lines stay separate");
+    check(events.size() == 3 && events[2].kind == "done" && events[2].text.empty(), "the end of a turn is an event");
+    check(bot::events_in("").empty() && bot::events_in("not a log at all").empty(), "something that is not a log is no events");
 }
 
 }
@@ -140,6 +193,8 @@ auto main() -> int
     only_plain_host_names_are_allowed();
     remote_url_is_built_from_config_alone();
     the_web_face_reads_and_does_nothing_else();
+    the_web_face_acts_only_for_its_owner();
+    a_transcript_is_read_from_the_log();
 
     if (failures == 0) {
         std::cout << "all unit checks passed\n";

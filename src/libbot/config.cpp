@@ -76,6 +76,11 @@ auto is_host_name(std::string_view candidate) -> bool
     return plain && hasLetter && candidate.front() != '.' && candidate.front() != '-';
 }
 
+auto is_address(std::string_view candidate) -> bool
+{
+    return !candidate.empty() && candidate.find_first_not_of("0123456789abcdefABCDEF.:") == std::string_view::npos;
+}
+
 auto load_config(std::filesystem::path const& path) -> std::expected<Config, std::string>
 {
     auto file = std::ifstream{path};
@@ -121,6 +126,12 @@ auto load_config(std::filesystem::path const& path) -> std::expected<Config, std
             config.agentHome = expanded(value);
         } else if (key == "allow") {
             config.allow = words(value);
+        } else if (key == "probe") {
+            config.probe = words(value);
+        } else if (key == "owner") {
+            config.owner = value;
+        } else if (key == "whois") {
+            config.whois = words(value);
         } else {
             return std::unexpected(std::format("{}:{}: unknown key '{}'", path.string(), number, key));
         }
@@ -135,6 +146,11 @@ auto load_config(std::filesystem::path const& path) -> std::expected<Config, std
     for (auto const& name : config.allow) {
         if (!is_host_name(name)) {
             return std::unexpected(std::format("{}: 'allow' takes host names, and '{}' is not one", path.string(), name));
+        }
+    }
+    for (auto const& address : config.probe) {
+        if (!is_address(address)) {
+            return std::unexpected(std::format("{}: 'probe' takes addresses, and '{}' is not one", path.string(), address));
         }
     }
     return config;

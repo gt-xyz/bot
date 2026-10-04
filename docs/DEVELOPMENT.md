@@ -47,7 +47,12 @@ build directory as its only argument. It runs the unit tests, then:
   unless `bot check` fails and names what leaked;
 - has a session commit, plant a hook and hostile git configuration, and then
   asserts the branch was published, `main` did not move and nothing planted ran;
-- reads the web face through a pipe;
+- starts a session that takes messages, and asserts it is refused where
+  `bot check` fails and that its inbox is mounted read-only;
+- runs the adapter in `images/session` against a stand-in agent and reads its
+  output back as a transcript;
+- reads the web face through a pipe, as nobody, as its owner and as someone
+  else, and asserts that only its owner's own forms are acted on;
 - holds the library and the command to a line budget.
 
 It needs no network, no container runtime and no particular machine. That is a
@@ -78,6 +83,9 @@ through that one key, which is what lets the checks stand a script in its place.
     agent-env    file of NAME=value lines for the agent's credential (optional)
     agent-home   directory copied into each session's home           (optional)
     allow        host names a session may reach, separated by spaces (optional)
+    probe        addresses `bot check` always tries, beyond its own  (optional)
+    owner        who the web face obeys; without it, it only reads   (optional)
+    whois        command that prints who is at an address            (optional)
     runtime      container runtime; `podman` unless set              (optional)
     templates    template tree, if not the installed one             (optional)
     images       image definitions, if not the installed ones        (optional)
@@ -107,6 +115,26 @@ session is given is one command line, built by `session_arguments` in
 `src/libbot/session.cpp`, and `bot check` starts its probe through the same
 function, so what is proven is what runs.
 
+`bot run <project> [message]` starts a session with no terminal. It has a
+third mount, read-only:
+
+    inbox/    messages, one file each: 0001, 0002, ...
+
+and runs the image's adapter, `agent-loop`, which is the whole of what bot
+knows about any agent: a message in the inbox is one turn, and the turn comes
+back on standard output as records of a kind and a text. The runtime writes
+that output to `log`, and the transcript is read from there. A message is sent
+by writing the next file, which is all `bot say` and the web face's form do,
+so sending needs no process to be running. The session cannot write its inbox,
+and a turn is under way exactly when more messages have been sent than turns
+have ended; neither is recorded anywhere.
+
+`bot run` runs `bot check` first and starts nothing if it fails.
+
+The adapter does not have its agent ask permission for what it does. What a
+session may do is settled by the container, which holds whether or not the
+agent asks.
+
 `bot stop` publishes. It fetches the session's commits out of `tree/` into a
 repository the session never saw and pushes from there, as a branch named
 after the session. Git is never run inside `tree/` once the session has
@@ -115,6 +143,24 @@ configuration.
 
 The board reads `main` of each bare repository and the list of containers.
 Nothing is stored about a session beyond its directory.
+
+## The web face
+
+`bot serve` answers one request on standard input and exits, so there is no
+listening code: a socket unit listens and starts it per connection.
+
+With no `owner` it answers `GET` and nothing else. With one, it acts, and so:
+
+- Every request must be the owner's. Who is asking is the one thing a request
+  cannot claim for itself, the address it came from, which the socket unit
+  hands over. `whois` is run with that address and must print `owner`.
+- A form is acted on only if its `Origin` is this site and this site's name is
+  this machine's host name or an address. A page somewhere else cannot press
+  the buttons, and neither can a name somewhere else that resolves here.
+
+A session's page reloads itself while a turn is under way and has no form
+then, because a reload would empty it; `?write` is the same page standing
+still.
 
 ## Project names
 

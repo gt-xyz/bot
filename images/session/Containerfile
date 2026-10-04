@@ -25,5 +25,8 @@ RUN npm install --global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai
  && claude --version
 ENV DISABLE_AUTOUPDATER=1
 
+# The adapter: messages in, events out. A session that takes messages runs this.
+COPY --chmod=755 agent-loop /usr/local/bin/agent-loop
+
 RUN mkdir -p /work /home/agent
 WORKDIR /work

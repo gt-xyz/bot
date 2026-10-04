@@ -128,6 +128,9 @@ auto session_arguments(Config const& config, std::string const& id, std::string 
     };
     if (terminal) {
         arguments.insert(arguments.end(), {"--interactive", "--tty"});
+    } else {
+        // Messages arrive as files its owner writes. The session reads them and cannot write there.
+        arguments.insert(arguments.end(), {"--volume", (directory / "inbox").string() + ":/inbox:ro,Z"});
     }
     if (!config.agentEnv.empty()) {
         arguments.insert(arguments.end(), {"--env-file", config.agentEnv.string()});
@@ -142,7 +145,7 @@ auto start(Config const& config, std::string const& id, bool const terminal, std
 {
     auto const directory = session_directory(config, id);
     auto error = std::error_code{};
-    for (auto const* part : {"tree", "home", "proxy"}) {
+    for (auto const* part : {"tree", "home", "proxy", terminal ? "proxy" : "inbox"}) {
         std::filesystem::create_directories(directory / part, error);
     }
     if (error) {
@@ -251,10 +254,13 @@ auto quoted(std::string const& text) -> std::string
     return result + "'";
 }
 
-auto is_address(std::string_view candidate) -> bool
+auto project_of(std::string const& id) -> std::string
 {
-    return !candidate.empty() && candidate.find_first_not_of("0123456789abcdefABCDEF.:") == std::string_view::npos;
+    return id.substr(0, id.size() - stampLength - 1);
 }
+
+// The first words a session hears when its owner gave it none.
+constexpr auto nextWork = "Read AGENTS.md, then do the piece of work marked next. Commit what you do.";
 
 }
 
@@ -290,7 +296,7 @@ auto sessions(Config const& config) -> std::vector<Session>
         auto const state = states.find(container(id));
         result.push_back(Session{
             id,
-            id.substr(0, id.size() - stampLength - 1),
+            project_of(id),
             std::format("{}-{}-{} {}:{}", at.substr(0, 4), at.substr(4, 2), at.substr(6, 2), at.substr(9, 2), at.substr(11, 2)),
             state != states.end() ? state->second : "gone",
         });
@@ -299,15 +305,15 @@ auto sessions(Config const& config) -> std::vector<Session>
     return result;
 }
 
-auto up(Config const& config, std::string const& project) -> std::expected<std::string, std::string>
+namespace {
+
+// A fresh clone on its own branch, cut off from where it came from, and a
+// home. The commits are made as whoever this machine's git says its owner is.
+auto prepare(Config const& config, std::string const& project) -> std::expected<std::string, std::string>
 {
     if (!is_valid_name(project)) {
         return std::unexpected(std::format("'{}' is not a usable project name", project));
     }
-    if (config.agent.empty()) {
-        return std::unexpected("'agent' is not set in the config: bot carries the choice of agent, it does not make it");
-    }
-
     auto const id = project + "-" + stamp();
     auto const directory = session_directory(config, id);
     auto const tree = directory / "tree";
@@ -316,8 +322,6 @@ auto up(Config const& config, std::string const& project) -> std::expected<std::
         return std::unexpected(std::format("cannot create {}", directory.string()));
     }
 
-    // A fresh clone on its own branch, cut off from where it came from. The
-    // commits are made as whoever this machine's git says its owner is.
     auto prepared = run_succeeds({"git", "clone", "-q", config.remote_url(project), tree.string()});
     for (auto const& argv : std::initializer_list<std::vector<std::string>>{
              {"git", "switch", "-q", "-c", id},
@@ -339,14 +343,153 @@ auto up(Config const& config, std::string const& project) -> std::expected<std::
             prepared = std::unexpected(std::format("cannot copy {}: {}", config.agentHome.string(), error.message()));
         }
     }
+    if (!prepared) {
+        (void)discard(config, id);
+        return std::unexpected(prepared.error());
+    }
+    return id;
+}
 
-    auto const started = prepared ? start(config, id, true, config.agent)
-                                  : std::expected<void, std::string>{std::unexpected(prepared.error())};
-    if (!started) {
+auto begin(Config const& config, std::string const& id, bool const terminal, std::vector<std::string> const& command)
+    -> std::expected<std::string, std::string>
+{
+    if (auto const started = start(config, id, terminal, command); !started) {
         (void)discard(config, id);
         return std::unexpected(started.error());
     }
     return id;
+}
+
+}
+
+auto up(Config const& config, std::string const& project) -> std::expected<std::string, std::string>
+{
+    if (config.agent.empty()) {
+        return std::unexpected("'agent' is not set in the config: bot carries the choice of agent, it does not make it");
+    }
+    auto const id = prepare(config, project);
+    return id ? begin(config, *id, true, config.agent) : id;
+}
+
+auto run_session(Config const& config, std::string const& project, std::string const& message)
+    -> std::expected<std::string, std::string>
+{
+    auto report = std::ostringstream{};
+    if (!check(config, {}, report)) {
+        auto failed = std::string{"a session is not contained on this machine, so none was started"};
+        for (auto const& line : lines(report.str())) {
+            failed += line.starts_with("FAIL") ? "\n" + line : std::string{};
+        }
+        return std::unexpected(failed);
+    }
+    auto const id = prepare(config, project);
+    if (!id) {
+        return id;
+    }
+    std::filesystem::create_directories(session_directory(config, *id) / "inbox");
+    if (auto const said = say(config, *id, message.empty() ? nextWork : message); !said) {
+        (void)discard(config, *id);
+        return std::unexpected(said.error());
+    }
+    // The image's adapter: one turn of its agent for each message in the inbox.
+    return begin(config, *id, false, {"agent-loop"});
+}
+
+auto resolve(Config const& config, std::string const& name) -> std::expected<std::string, std::string>
+{
+    if (is_session(config, name)) {
+        return name;
+    }
+    auto newest = std::string{};
+    for (auto const& session : sessions(config)) {
+        newest = session.project == name ? session.id : newest;
+    }
+    if (newest.empty()) {
+        return std::unexpected(std::format("no session named {}, and no session on a project named {}", name, name));
+    }
+    return newest;
+}
+
+auto takes_messages(Config const& config, std::string const& id) -> bool
+{
+    return is_session(config, id) && std::filesystem::is_directory(session_directory(config, id) / "inbox");
+}
+
+namespace {
+
+// Messages are files named 0001, 0002 and so on. The count of them is how
+// many have been sent, and nothing else records it.
+auto sent(std::filesystem::path const& inbox) -> int
+{
+    auto count = 0;
+    auto error = std::error_code{};
+    for (auto const& entry : std::filesystem::directory_iterator{inbox, error}) {
+        count += entry.path().filename().string().size() == 4 ? 1 : 0;
+    }
+    return count;
+}
+
+}
+
+auto say(Config const& config, std::string const& id, std::string const& message) -> std::expected<void, std::string>
+{
+    if (!takes_messages(config, id)) {
+        return std::unexpected(std::format("{} is attended in a terminal and takes no messages; `bot attach {}`", id, id));
+    }
+    if (trimmed(message).empty()) {
+        return std::unexpected("there is nothing in that message");
+    }
+    auto const inbox = session_directory(config, id) / "inbox";
+    auto const draft = inbox / "draft";
+    std::ofstream{draft} << trimmed(message) << '\n';
+    auto error = std::error_code{};
+    std::filesystem::rename(draft, inbox / std::format("{:04}", sent(inbox) + 1), error);
+    if (error) {
+        return std::unexpected(std::format("cannot write to {}: {}", inbox.string(), error.message()));
+    }
+    return {};
+}
+
+// The log is the container's output as the runtime wrote it: a time, a
+// stream, whether the line is whole, then the text. The adapter's output is
+// records: a separator and a kind on one line, then the text.
+auto events_in(std::string_view log) -> std::vector<Event>
+{
+    auto output = std::string{};
+    for (auto position = std::size_t{0}; position < log.size();) {
+        auto const end = std::min(log.find('\n', position), log.size());
+        auto const line = log.substr(position, end - position);
+        position = end + 1;
+        auto const stream = line.find(' ');
+        auto const tag = stream == std::string_view::npos ? stream : line.find(' ', stream + 1);
+        auto const text = tag == std::string_view::npos ? tag : line.find(' ', tag + 1);
+        if (text != std::string_view::npos) {
+            output += line.substr(text + 1);
+            output += line.substr(tag + 1, text - tag - 1) == "F" ? "\n" : "";
+        }
+    }
+
+    auto events = std::vector<Event>{};
+    for (auto position = output.find('\x1e'); position != std::string::npos;) {
+        auto const next = output.find('\x1e', position + 1);
+        auto const record = output.substr(position + 1, next == std::string::npos ? next : next - position - 1);
+        auto const kindEnd = std::min(record.find('\n'), record.size());
+        events.push_back(Event{record.substr(0, kindEnd), trimmed(record.substr(std::min(kindEnd + 1, record.size())))});
+        position = next;
+    }
+    return events;
+}
+
+auto transcript(Config const& config, std::string const& id) -> Transcript
+{
+    auto file = std::ifstream{session_directory(config, id) / "log", std::ios::binary};
+    auto buffer = std::ostringstream{};
+    buffer << file.rdbuf();
+    auto result = Transcript{events_in(buffer.str()), false};
+    // Every message ends in exactly one `done`, so more sent than done means a turn is under way.
+    result.working = sent(session_directory(config, id) / "inbox")
+        > std::ranges::count(result.events, "done", &Event::kind);
+    return result;
 }
 
 auto attach_command(Config const& config, std::string const& id) -> std::vector<std::string>
@@ -361,7 +504,7 @@ auto stop(Config const& config, std::string const& id) -> std::expected<std::str
     }
     (void)run({config.runtime, "stop", container(id)});
     (void)run({config.runtime, "rm", "--force", proxy(id)});
-    return publish(config, id, id.substr(0, id.size() - stampLength - 1));
+    return publish(config, id, project_of(id));
 }
 
 auto remove(Config const& config, std::string const& id) -> std::expected<std::string, std::string>
@@ -387,6 +530,7 @@ auto check(Config const& config, std::vector<std::string> const& addresses, std:
     // The addresses that must be out of reach: every one this machine has,
     // which covers its tailnet and local-network faces, and any others given.
     auto unreachable = addresses;
+    unreachable.insert(unreachable.end(), config.probe.begin(), config.probe.end());
     if (auto const own = run_succeeds({"hostname", "-I"}); own) {
         auto stream = std::istringstream{*own};
         for (auto address = std::string{}; stream >> address;) {
@@ -450,6 +594,7 @@ auto check(Config const& config, std::vector<std::string> const& addresses, std:
     say(inside("test \"$(id -u)\" != 0"), "a session is not root");
     say(inside("grep -Eq '^CapEff:[[:space:]]*0+$' /proc/self/status"), "a session holds no capabilities");
     say(inside("grep -Eq '^[^ ]+ / [^ ]+ ro[, ]' /proc/mounts"), "a session's root filesystem is read-only");
+    say(inside("! test -w /inbox"), "a session cannot write where its messages arrive");
     say(hidden(sentinel), "a session cannot see the directory that holds the other sessions");
     say(hidden(default_config_path()), "a session cannot see this tool's configuration");
     if (!config.agentEnv.empty()) {

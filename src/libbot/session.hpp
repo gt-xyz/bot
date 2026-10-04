@@ -27,6 +27,30 @@ auto is_session(Config const& config, std::string const& id) -> bool;
 // session's id, with the agent running and nobody attached.
 auto up(Config const& config, std::string const& project) -> std::expected<std::string, std::string>;
 
+// A session named exactly, or a project, meaning its newest session.
+auto resolve(Config const& config, std::string const& name) -> std::expected<std::string, std::string>;
+
+// Start a session that takes messages instead of a terminal, with this as its
+// first. Refused unless `check` passes here and now: nothing is dispatched to
+// a machine that does not contain it.
+auto run_session(Config const& config, std::string const& project, std::string const& message)
+    -> std::expected<std::string, std::string>;
+
+auto takes_messages(Config const& config, std::string const& id) -> bool;
+auto say(Config const& config, std::string const& id, std::string const& message) -> std::expected<void, std::string>;
+
+// What a session that takes messages has said and done, read from its log.
+struct Event {
+    std::string kind;
+    std::string text;
+};
+struct Transcript {
+    std::vector<Event> events;
+    bool working = false;
+};
+auto transcript(Config const& config, std::string const& id) -> Transcript;
+auto events_in(std::string_view log) -> std::vector<Event>;
+
 auto attach_command(Config const& config, std::string const& id) -> std::vector<std::string>;
 
 // Stop the containers, then publish whatever the session committed as a

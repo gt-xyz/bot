@@ -4,7 +4,10 @@
 #include "libbot/session.hpp"
 #include "libbot/web.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <expected>
 #include <format>
 #include <fstream>
@@ -67,16 +70,19 @@ auto ask_notes() -> std::string
 
 auto usage() -> int
 {
-    std::cerr << "bot init <project>      create a project: three questions, then work\n"
-                 "bot up <project>        start a session on a fresh clone and attach to it\n"
-                 "bot attach <session>    attach to a running session; ctrl-p ctrl-q detaches\n"
-                 "bot stop <session>      stop a session and publish its branch\n"
-                 "bot rm <session>        stop, publish, and delete a session\n"
-                 "bot log <session>       what a session has printed so far\n"
-                 "bot ls                  projects and sessions\n"
-                 "bot check [address...]  prove a session is contained on this machine\n"
-                 "bot serve               answer one http request on stdin, for a socket unit\n"
-                 "bot scaffold <directory> <name> <profile> <description> [notes-file]\n";
+    std::cerr << "bot init <project>            create a project: three questions, then work\n"
+                 "bot run <project> [message]   start a session that takes messages; with none, the next work\n"
+                 "bot say <session> <message>   send it another\n"
+                 "bot up <project>              start a session in a terminal and attach to it\n"
+                 "bot attach <session>          attach to a terminal session; ctrl-p ctrl-q detaches\n"
+                 "bot stop <session>            stop a session and publish its branch\n"
+                 "bot rm <session>              stop, publish, and delete a session\n"
+                 "bot log <session>             what a session has printed so far\n"
+                 "bot ls                        projects and sessions\n"
+                 "bot check [address...]        prove a session is contained on this machine\n"
+                 "bot serve                     answer one http request on stdin, for a socket unit\n"
+                 "bot scaffold <directory> <name> <profile> <description> [notes-file]\n"
+                 "a <session> may be a project's name, meaning its newest session\n";
     return 2;
 }
 
@@ -124,14 +130,23 @@ auto command_serve(bot::Config const& config) -> int
 {
     auto request = std::string{};
     auto buffer = std::array<char, 2048>{};
-    while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
+    auto wanted = std::string::npos;
+    while (request.size() < std::min(wanted, std::size_t{262144})) {
         auto const count = ::read(STDIN_FILENO, buffer.data(), buffer.size());
         if (count <= 0) {
             break;
         }
         request.append(buffer.data(), static_cast<std::size_t>(count));
+        // Once the headers are in, the body's length is known; a form's body is all that is waited for.
+        if (auto const head = request.find("\r\n\r\n"); wanted == std::string::npos && head != std::string::npos) {
+            auto lowered = request.substr(0, head);
+            std::ranges::transform(lowered, lowered.begin(), [](unsigned char character) { return std::tolower(character); });
+            auto const length = lowered.find("content-length:");
+            wanted = head + 4 + (length == std::string::npos ? 0 : std::strtoul(lowered.c_str() + length + 15, nullptr, 10));
+        }
     }
-    std::cout << bot::respond(config, request) << std::flush;
+    auto const* remote = std::getenv("REMOTE_ADDR");
+    std::cout << bot::respond(config, request, remote != nullptr ? remote : "") << std::flush;
     return 0;
 }
 
@@ -201,6 +216,18 @@ auto main(int argc, char** argv) -> int
     if (command == "check") {
         return bot::check(*config, rest, std::cout) ? 0 : fail("a session is not contained on this machine");
     }
+    if ((command == "run" || command == "say") && !rest.empty()) {
+        auto message = std::string{};
+        for (auto index = std::size_t{1}; index < rest.size(); ++index) {
+            message += (index > 1 ? " " : "") + rest[index];
+        }
+        if (command == "run") {
+            return say(bot::run_session(*config, rest[0], message));
+        }
+        auto const id = bot::resolve(*config, rest[0]);
+        auto const sent = id ? bot::say(*config, *id, message) : std::unexpected(id.error());
+        return sent ? 0 : fail(sent.error());
+    }
     if (rest.size() != 1) {
         return usage();
     }
@@ -215,17 +242,18 @@ auto main(int argc, char** argv) -> int
         std::cerr << std::format("session {}: ctrl-p ctrl-q detaches, `bot attach {}` returns\n", *id, *id);
         return fail(bot::replace(bot::attach_command(*config, *id)));
     }
+    auto const id = bot::resolve(*config, rest[0]);
+    if (!id) {
+        return fail(id.error());
+    }
     if (command == "stop") {
-        return say(bot::stop(*config, rest[0]));
+        return say(bot::stop(*config, *id));
     }
     if (command == "rm") {
-        return say(bot::remove(*config, rest[0]));
+        return say(bot::remove(*config, *id));
     }
     if (command == "attach" || command == "log") {
-        if (!bot::is_session(*config, rest[0])) {
-            return fail(std::format("no session named {}", rest[0]));
-        }
-        auto attach = bot::attach_command(*config, rest[0]);
+        auto attach = bot::attach_command(*config, *id);
         if (command == "log") {
             attach[1] = "logs";
         }

@@ -21,6 +21,9 @@ struct Config {
     std::filesystem::path agentEnv;
     std::filesystem::path agentHome;
     std::vector<std::string> allow;
+    std::vector<std::string> probe;
+    std::string owner;
+    std::vector<std::string> whois;
 
     auto remote_is_local() const -> bool { return remoteHost.empty(); }
     auto remote_url(std::string const& name) const -> std::string;
@@ -32,5 +35,6 @@ auto load_config(std::filesystem::path const& path) -> std::expected<Config, std
 // A name a session may reach through its proxy. It becomes a line in the
 // proxy's filter, so anything that is not a plain host name is refused.
 auto is_host_name(std::string_view candidate) -> bool;
+auto is_address(std::string_view candidate) -> bool;
 
 }

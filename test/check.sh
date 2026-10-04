@@ -94,7 +94,8 @@ if BOT_TEMPLATES="$root/templates" "$bot" scaffold "$workspace/bogus" bogus rust
 fi
 
 # Sessions, against a container runtime that contains nothing. It records
-# what it is asked and runs `exec` directly on this machine. Two things are
+# what it is asked and runs `exec` directly on this machine, unless it is told
+# to pretend that it contains, when it answers every probe as held. Two things are
 # proven with it and neither needs a real runtime: what bot asks for when it
 # starts a session, and that `bot check` fails when what it asked for is not
 # enforced. That the real runtime enforces it is proven by `bot check` there.
@@ -113,10 +114,10 @@ echo "$*" >>"$BOT_ASKED"
 case "$1 ${2:-}" in
   "image exists") exit 0 ;;
   "network exists") exit 1 ;;
-  "info --format") echo false ;;
+  "info --format") if [ -n "${BOT_CONTAINS:-}" ]; then echo true; else echo false; fi ;;
   "ps --all") if [ "$4" = "{{.Names}}" ]; then cut -d' ' -f1 "$BOT_RUNNING"; else cat "$BOT_RUNNING"; fi ;;
-  "inspect --format") case "$3" in *Mounts*) echo "$HOME" ;; *) echo proxy.invalid ;; esac ;;
-  "exec "*) shift 2; HTTPS_PROXY=http://proxy.invalid:8888 exec "$@" ;;
+  "inspect --format") case "$3" in *Mounts*) [ -n "${BOT_CONTAINS:-}" ] || echo "$HOME" ;; *) echo proxy.invalid ;; esac ;;
+  "exec "*) [ -z "${BOT_CONTAINS:-}" ] || exit 0; shift 2; HTTPS_PROXY=http://proxy.invalid:8888 exec "$@" ;;
 esac
 exit 0
 RUNTIME
@@ -243,6 +244,95 @@ ln -s "$workspace/elsewhere/.git" "$sessions/$second/tree/.git"
 "$bot" stop "$second" >/dev/null 2>&1 && fail "stop: published from a repository the session was not given"
 git --git-dir "$remote" rev-parse -q --verify "$second" >/dev/null && fail "stop: a branch arrived from elsewhere"
 
+# A session that takes messages. It is not started where `bot check` fails,
+# which on this stand-in runtime is everywhere unless it is told to pretend.
+sleep 1
+count="$(ls "$sessions" | wc -l)"
+"$bot" run demo "do the thing" >/dev/null 2>&1 && fail "run: started a session on a machine that failed the check"
+[ "$(ls "$sessions" | wc -l)" -eq "$count" ] || fail "run: a refused session was left behind"
+
+export BOT_CONTAINS=1
+talking="$("$bot" run demo "do the thing" 2>/dev/null)" || fail "run: did not start a session"
+talk="$sessions/$talking"
+given="$(grep -E "^run --detach --name bot-$talking " "$asked" || true)"
+[ "$(cat "$talk/inbox/0001" 2>/dev/null)" = "do the thing" ] || fail "run: the first message is not in the inbox"
+[ "$(grep -o -- '--volume' <<<"$given" | wc -l)" -eq 3 ] || fail "run: a session is given other than three mounts"
+expect_text "$given" "--volume $talk/inbox:/inbox:ro,Z" "run: the inbox is not mounted read-only"
+expect_text "$given" "bot-session:latest agent-loop" "run: the session does not run the adapter"
+expect_absent_text "$given" "--tty" "run: a session that takes messages was given a terminal"
+"$bot" say demo "and then this" 2>/dev/null || fail "say: a project's name did not reach its newest session"
+[ "$(cat "$talk/inbox/0002" 2>/dev/null)" = "and then this" ] || fail "say: the second message is not in the inbox"
+"$bot" say "$second" "hello" 2>/dev/null && fail "say: a terminal session accepted a message"
+
+# The adapter, for real, with a stand-in for the agent behind it. Its output
+# becomes the session's log in the form the runtime writes, and is read back.
+command -v jq >/dev/null || fail "jq is needed to run the adapter"
+mkdir -p "$workspace/agent"
+cat >"$workspace/agent/claude" <<'AGENT'
+#!/bin/sh
+echo "$*" >>"$AGENT_ASKED"
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Looking at <the> files."}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}'
+echo 'something that is not an event'
+echo '{"type":"result","subtype":"success","is_error":false}'
+AGENT
+chmod +x "$workspace/agent/claude"
+PATH="$workspace/agent:$PATH" BOT_INBOX="$talk/inbox" AGENT_ASKED="$workspace/agent/asked" \
+  timeout 2 "$root/images/session/agent-loop" >"$workspace/agent/said" || true
+sed 's/^/2026-01-01T00:00:00Z stdout F /' "$workspace/agent/said" >"$talk/log"
+[ "$(grep -c -- '--continue' "$workspace/agent/asked")" -eq 1 ] || fail "adapter: only the turns after the first continue the conversation"
+echo "bot-$talking running" >"$BOT_RUNNING"
+
+# The web face with an owner. Who is asking is the address the request came
+# from, as the network reports it; everything else about a request is claimed.
+cat >"$workspace/whois" <<'WHOIS'
+#!/bin/sh
+[ "$1" = "fd00::1" ] && echo owner@example.invalid || echo someone@example.invalid
+WHOIS
+chmod +x "$workspace/whois"
+printf 'owner = owner@example.invalid\nwhois = %s\n' "$workspace/whois" >>"$HOME/.config/bot/config"
+
+get() {
+  printf 'GET %s HTTP/1.1\r\nHost: [fd00::2]:8807\r\n\r\n' "$2" | REMOTE_ADDR="$1" "$bot" serve
+}
+post() {
+  printf 'POST %s HTTP/1.1\r\nHost: [fd00::2]:8807\r\nOrigin: %s\r\nContent-Length: %d\r\n\r\n%s' \
+    "$2" "${4:-http://[fd00::2]:8807}" "${#3}" "$3" | REMOTE_ADDR="$1" "$bot" serve
+}
+
+expect_text "$(get fd00::9 /)" "HTTP/1.0 403" "serve: someone who is not the owner could read"
+expect_text "$(get fd00::1 /)" 'action="/init"' "serve: the owner is not offered a new project"
+
+said="$(get fd00::1 "/session/$talking")"
+expect_text "$said" "do the thing" "serve: the owner's message is not in the transcript"
+expect_text "$said" "Looking at &lt;the&gt; files." "serve: the agent's words are not in the transcript, escaped"
+expect_text "$said" 'Shell {&quot;command&quot;:&quot;ls&quot;}' "serve: a tool call is not in the transcript"
+expect_text "$said" "something that is not an event" "serve: output that is not an event was lost"
+expect_text "$said" "action=\"/session/$talking/say\"" "serve: an idle session has no form for the next message"
+expect_absent_text "$said" "http-equiv=refresh" "serve: an idle session's page reloads under whoever is typing"
+
+expect_text "$(post fd00::9 "/session/$talking/say" "message=no")" "HTTP/1.0 403" "serve: someone else sent a message"
+expect_text "$(post fd00::1 "/session/$talking/say" "message=no" "http://elsewhere.example")" "HTTP/1.0 403" \
+  "serve: a form from another site's page was acted on"
+[ -e "$talk/inbox/0003" ] && fail "serve: a refused message reached the inbox"
+expect_text "$(post fd00::1 "/session/$talking/say" "message=once+more%21")" "Location: /session/$talking" "serve: the owner's message was not taken"
+[ "$(cat "$talk/inbox/0003" 2>/dev/null)" = "once more!" ] || fail "serve: the owner's message is not in the inbox as written"
+
+working="$(get fd00::1 "/session/$talking")"
+expect_text "$working" "http-equiv=refresh" "serve: a working session's page does not reload"
+expect_absent_text "$working" "<textarea" "serve: a working session's page has a form a reload would empty"
+expect_text "$(get fd00::1 "/session/$talking?write")" "<textarea" "serve: there is no way to write to a working session"
+
+started="$(post fd00::1 /project/demo/run "message=from+the+web")"
+expect_text "$started" "303 See Other" "serve: the owner could not start a session"
+[ "$(cat "$sessions"/demo-*/inbox/0001 | grep -c 'from the web')" -eq 1 ] || fail "serve: the session started from the web has no first message"
+expect_text "$(post fd00::1 "/session/$talking/stop" "")" "nothing committed beyond main" "serve: stopping did not say what was published"
+expect_text "$(post fd00::1 /init "name=fromweb&description=made+from+the+web&profile=none")" "Location: /project/fromweb" \
+  "serve: the owner could not create a project"
+git --git-dir "$workspace/remotes/fromweb.git" cat-file -e main:AGENTS.md 2>/dev/null || fail "serve: the project made from the web has no scaffold"
+unset BOT_CONTAINS
+
 # Nothing tracked here may name a machine, an account or an address.
 if git -C "$root" grep -nIE '[0-9]{1,3}(\.[0-9]{1,3}){3}' -- . >/dev/null 2>&1; then
   fail "a tracked file contains an IP address"
@@ -256,7 +346,7 @@ expect_absent "$root" CLAUDE.md
 expect_contains "$root/README.md" "docs/PROJECT.md"
 
 # Scope is a budget. Raise it only in a commit that says why.
-budget=1700
+budget=2100
 lines="$(cat "$root"/src/libbot/* "$root"/src/bot/* | wc -l)"
 [ "$lines" -le "$budget" ] || fail "the library and the command are $lines lines, over the budget of $budget"
 

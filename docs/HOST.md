@@ -12,7 +12,7 @@ you find out whether it holds on yours.
 
 Debian 13 or anything as recent, with:
 
-    git  cmake  ninja-build  g++  podman  curl
+    git  cmake  ninja-build  g++  podman  curl  jq
 
 and a user that is not root to own everything. Sessions belong to that user,
 and must outlive its logins:
@@ -66,28 +66,34 @@ otherwise, and says which boundary did not hold.
 Do not start a session on a host where this fails. Run it again after changing
 the config, the runtime or the network the host is on.
 
-## A first session
+## Sessions
 
     bot init <project>
-    bot up <project>
+    bot run <project> "what it should do"
+    bot say <project> "and then this"
+    bot stop <project>
 
-`ctrl-p ctrl-q` detaches and leaves it running. `bot attach <session>` returns
-to it, from any terminal that can ssh to the host. `bot stop <session>`
-publishes its branch; from another machine the project is
+A project's name stands for its newest session. `bot run` proves containment
+again before it starts anything, so put the addresses you gave `bot check` in
+the config as `probe`. `bot stop` publishes the session's branch; from another
+machine the project is
 
     git clone <host>:git/<project>.git
 
+`bot up <project>` is the same session with the agent's own terminal interface
+instead of messages. `ctrl-p ctrl-q` detaches from it and `bot attach` returns.
+
 ## The web face
 
-It reads; it does not act. `bot serve` answers one request on its standard
-input, so a socket unit does the listening. As your user, in
-`~/.config/systemd/user/`:
+`bot serve` answers one request on its standard input, so a socket unit does
+the listening. It should listen on the tailnet and nowhere else. As your user,
+in `~/.config/systemd/user/`:
 
 `bot.socket`
 
     [Socket]
-    ListenStream=8807
-    BindToDevice=lo
+    ListenStream=<this machine's tailnet address>:8807
+    FreeBind=yes
     Accept=yes
 
     [Install]
@@ -99,16 +105,20 @@ input, so a socket unit does the listening. As your user, in
     ExecStart=/usr/local/bin/bot serve
     StandardInput=socket
     StandardError=journal
+    KillMode=process
 
 then
 
     systemctl --user enable --now bot.socket
 
-That listens on the host's loopback only. To reach it from your other devices,
-let the tailnet's own serving layer forward to it, so it is never on the local
-network or the internet:
+Until it is told who owns it, it only reads, for anyone who can reach it. To
+make it yours, and able to start sessions and send messages, give the config
+your name on the tailnet and a command that prints the name of whoever is at
+an address:
 
-    sudo tailscale serve --bg 8807
+    owner = <your login on the tailnet>
+    whois = <the full path of a script that prints the login at the address given>
 
-A session cannot reach it either: a session has no route to the host, and
-`bot check` is what shows that.
+The web face then refuses every request that does not come from one of your
+devices. A session cannot reach it either way: a session has no route to the
+host, and `bot check` is what shows that.
