@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# The adapter between bot and one agent (work note 0013). bot knows this
+# contract and nothing about the agent behind it:
+#
+#   in    /inbox/0001, /inbox/0002, ...  one message each, taken in order
+#   out   standard output, as records: a separator character and a kind on
+#         one line, then the text. Kinds: you, agent, tool, error, done.
+#
+# Each message is one turn of the agent, continuing from the last. Every turn
+# ends in exactly one `done`, which is how a reader knows the agent is idle.
+#
+# The agent is not asked to seek permission for what it does. What it may do
+# is decided by the container it is in, which does not depend on its asking.
+set -u
+
+inbox="${BOT_INBOX:-/inbox}"
+
+record() {
+  printf '\036%s\n%s\n' "$1" "${2:-}"
+}
+
+# The agent's own events, one JSON object a line, to records. Anything that is
+# not such an object is something going wrong, and is shown rather than lost.
+events='
+def clean: gsub("\u001e"; "");
+. as $line
+| (try fromjson catch null) as $event
+| if ($event | type) != "object" then
+    (if ($line | length) > 0 then "\u001eerror\n" + ($line | clean) else empty end)
+  elif $event.type == "assistant" then
+    $event.message.content[]?
+    | if .type == "text" then "\u001eagent\n" + (.text | clean)
+      elif .type == "tool_use" then "\u001etool\n" + .name + " " + (.input | tojson | clean | .[0:300])
+      else empty end
+  elif $event.type == "result" and $event.is_error == true then
+    "\u001eerror\n" + (($event.result // $event.subtype // "the agent reported an error") | tostring | clean)
+  else empty end
+'
+
+next=1
+while :; do
+  message="$inbox/$(printf '%04d' "$next")"
+  if [ ! -f "$message" ]; then
+    sleep 1
+    continue
+  fi
+  text="$(cat "$message")"
+  record you "$text"
+  arguments=(--print "$text" --output-format stream-json --verbose --dangerously-skip-permissions)
+  if [ "$next" -gt 1 ]; then
+    arguments+=(--continue)
+  fi
+  claude "${arguments[@]}" </dev/null 2>&1 | jq --unbuffered -Rr "$events"
+  record done
+  next=$((next + 1))
+done

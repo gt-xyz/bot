@@ -1,5 +1,6 @@
 ---
 title: bot run, an unattended session
+next: true
 ---
 
 `bot up` starts a session with you in it. `bot run <project>` starts one that

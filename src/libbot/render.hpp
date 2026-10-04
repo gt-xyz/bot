@@ -3,7 +3,7 @@
 #include <map>
 #include <string>
 
-namespace bee {
+namespace bot {
 
 using Fields = std::map<std::string, std::string>;
 

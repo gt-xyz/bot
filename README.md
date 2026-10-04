@@ -1,11 +1,12 @@
-# bee
+# bot
 
-One command per project: a repository, a container, a session, an agent.
+Projects, and contained sessions of an agent on them, on one machine you own.
 
 ## Start here
 
 - `docs/PROJECT.md` — what this is, why it exists, and what it deliberately is not
 - `docs/DEVELOPMENT.md` — how to build it and how it is verified
+- `docs/HOST.md` — setting up the machine it runs on, and proving a session is contained there
 - `work/` — what happens next; the one marked `next: true` is the one to pick up
 
 Everything above is meant to be read. Anything beginning with a dot is
@@ -23,6 +24,6 @@ was written on.
 
 ## Configuring
 
-`~/.config/bee/config`, as `key = value` lines; `docs/DEVELOPMENT.md` lists
+`~/.config/bot/config`, as `key = value` lines; `docs/DEVELOPMENT.md` lists
 them. Nothing machine-specific belongs in this repository, and a check enforces
 that.

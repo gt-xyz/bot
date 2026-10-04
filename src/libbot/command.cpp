@@ -1,8 +1,7 @@
-#include "libbee/command.hpp"
+#include "libbot/command.hpp"
 
 #include <array>
 #include <cerrno>
-#include <csignal>
 #include <cstring>
 #include <format>
 
@@ -12,7 +11,7 @@
 
 extern char** environ;
 
-namespace bee {
+namespace bot {
 namespace {
 
 auto to_c_argv(std::vector<std::string> const& argv) -> std::vector<char*>
@@ -86,6 +85,26 @@ auto run(std::vector<std::string> const& argv,
 
     auto const status = WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : 128 + WTERMSIG(waitStatus);
     return CommandResult{status, std::move(output)};
+}
+
+auto run_visible(std::vector<std::string> const& argv) -> std::expected<int, std::string>
+{
+    auto raw = to_c_argv(argv);
+    auto child = pid_t{};
+    if (auto const spawned = ::posix_spawnp(&child, raw[0], nullptr, nullptr, raw.data(), environ); spawned != 0) {
+        return std::unexpected(std::format("{}: {}", argv[0], std::strerror(spawned)));
+    }
+    auto waitStatus = int{};
+    while (::waitpid(child, &waitStatus, 0) < 0 && errno == EINTR) {
+    }
+    return WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : 128 + WTERMSIG(waitStatus);
+}
+
+auto replace(std::vector<std::string> const& argv) -> std::string
+{
+    auto raw = to_c_argv(argv);
+    ::execvp(raw[0], raw.data());
+    return std::format("{}: {}", argv[0], std::strerror(errno));
 }
 
 auto run_succeeds(std::vector<std::string> const& argv,

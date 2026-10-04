@@ -1,7 +1,9 @@
-#include "libbee/command.hpp"
-#include "libbee/config.hpp"
-#include "libbee/project.hpp"
-#include "libbee/render.hpp"
+#include "libbot/command.hpp"
+#include "libbot/config.hpp"
+#include "libbot/project.hpp"
+#include "libbot/render.hpp"
+#include "libbot/session.hpp"
+#include "libbot/web.hpp"
 
 #include <cstdlib>
 #include <format>
@@ -22,74 +24,162 @@ auto check(bool const condition, std::string_view what) -> void
 
 auto render_substitutes_only_known_keys() -> void
 {
-    auto const fields = bee::Fields{{"name", "kestrel"}};
-    check(bee::render("hello {{name}}", fields) == "hello kestrel", "render substitutes a known key");
-    check(bee::render("${{ github.sha }}", fields) == "${{ github.sha }}",
+    auto const fields = bot::Fields{{"name", "kestrel"}};
+    check(bot::render("hello {{name}}", fields) == "hello kestrel", "render substitutes a known key");
+    check(bot::render("${{ github.sha }}", fields) == "${{ github.sha }}",
           "render leaves another tool's braces alone");
-    check(bee::render("{{unclosed", fields) == "{{unclosed", "render tolerates an unclosed brace");
-    check(bee::render("{{a}}{{name}}", fields) == "{{a}}kestrel", "render keeps unknown keys verbatim");
+    check(bot::render("{{unclosed", fields) == "{{unclosed", "render tolerates an unclosed brace");
+    check(bot::render("{{a}}{{name}}", fields) == "{{a}}kestrel", "render keeps unknown keys verbatim");
 }
 
 // The name reaches a remote shell through ssh, where no quoting is portable.
 auto names_that_could_reach_a_remote_shell_are_refused() -> void
 {
-    check(bee::is_valid_name("gd-water"), "a plain name is accepted");
-    check(bee::is_valid_name("bee_2"), "underscores and digits are accepted");
-    check(!bee::is_valid_name(""), "the empty name is refused");
-    check(!bee::is_valid_name("-leading"), "a leading dash is refused");
-    check(!bee::is_valid_name("../escape"), "path traversal is refused");
-    check(!bee::is_valid_name("a;rm -rf /"), "shell metacharacters are refused");
-    check(!bee::is_valid_name("a b"), "whitespace is refused");
-    check(!bee::is_valid_name("$(whoami)"), "command substitution is refused");
+    check(bot::is_valid_name("gd-water"), "a plain name is accepted");
+    check(bot::is_valid_name("bot_2"), "underscores and digits are accepted");
+    check(!bot::is_valid_name(""), "the empty name is refused");
+    check(!bot::is_valid_name("-leading"), "a leading dash is refused");
+    check(!bot::is_valid_name("../escape"), "path traversal is refused");
+    check(!bot::is_valid_name("a;rm -rf /"), "shell metacharacters are refused");
+    check(!bot::is_valid_name("a b"), "whitespace is refused");
+    check(!bot::is_valid_name("$(whoami)"), "command substitution is refused");
 }
 
 auto commands_run_without_a_shell() -> void
 {
-    auto const echoed = bee::run({"echo", "$HOME && rm"});
+    auto const echoed = bot::run({"echo", "$HOME && rm"});
     check(echoed.has_value() && echoed->status == 0, "echo runs");
     check(echoed && echoed->output == "$HOME && rm\n", "arguments reach the child uninterpreted");
 
-    auto const missing = bee::run({"a-command-that-does-not-exist"});
+    auto const missing = bot::run({"a-command-that-does-not-exist"});
     check(!missing.has_value(), "a missing command is an error, not a crash");
 
-    auto const failing = bee::run({"false"});
+    auto const failing = bot::run({"false"});
     check(failing.has_value() && failing->status != 0, "a non-zero exit is reported, not thrown");
 }
 
 auto config_rejects_what_it_cannot_understand() -> void
 {
-    auto const path = std::filesystem::temp_directory_path() / "bee-unit-config";
-    {
-        auto file = std::ofstream{path};
-        file << "# a comment\nprojects = /tmp/p\ntemplates = /tmp/t\n";
-    }
-    auto const good = bee::load_config(path);
+    auto const path = std::filesystem::temp_directory_path() / "bot-unit-config";
+    auto const loads = [&path](std::string_view content) {
+        {
+            auto file = std::ofstream{path};
+            file << content;
+        }
+        return bot::load_config(path);
+    };
+
+    auto const good = loads("# a comment\nsessions = /tmp/s\nremote-root = /tmp/r\n");
     check(good.has_value(), "a minimal config loads");
-    check(good && !good->has_remote(), "a config without a remote is allowed");
+    check(good && good->remote_is_local(), "a remote without a host is on this machine");
+    check(good && good->runtime == "podman", "the runtime has a default");
+    check(good && good->allow.empty(), "nothing is reachable unless it is allowed");
 
-    {
-        auto file = std::ofstream{path};
-        file << "projects = /tmp/p\ntemplates = /tmp/t\nnonsense = 1\n";
-    }
-    check(!bee::load_config(path).has_value(), "an unknown key is refused rather than ignored");
+    check(!loads("sessions = /tmp/s\nremote-root = /tmp/r\nnonsense = 1\n").has_value(),
+          "an unknown key is refused rather than ignored");
+    check(!loads("remote-root = /tmp/r\n").has_value(), "a missing 'sessions' is refused");
+    check(!loads("sessions = /tmp/s\n").has_value(), "a missing 'remote-root' is refused");
 
-    {
-        auto file = std::ofstream{path};
-        file << "templates = /tmp/t\n";
-    }
-    check(!bee::load_config(path).has_value(), "a missing 'projects' is refused");
+    auto const agent = loads("sessions = /tmp/s\nremote-root = /tmp/r\nagent = an-agent --flag\nallow = a.example b.example\n");
+    check(agent && agent->agent == std::vector<std::string>{"an-agent", "--flag"}, "the agent is a command line");
+    check(agent && agent->allow.size() == 2, "allowed names are separated by spaces");
 
     std::filesystem::remove(path);
-    check(!bee::load_config(path).has_value(), "an absent config is an error");
+    check(!bot::load_config(path).has_value(), "an absent config is an error");
+}
+
+// An allowed name becomes a line in the proxy's filter. Anything that could
+// widen that line, or name a machine by address, is not a name.
+auto only_plain_host_names_are_allowed() -> void
+{
+    auto const path = std::filesystem::temp_directory_path() / "bot-unit-config";
+    check(bot::is_host_name("api.example.com"), "a host name is accepted");
+    check(!bot::is_host_name(".*"), "a pattern is refused");
+    check(!bot::is_host_name("*.example.com"), "a wildcard is refused");
+    check(!bot::is_host_name("example.com|.*"), "an alternation is refused");
+    check(!bot::is_host_name(std::format("{}.{}.{}.{}", 10, 0, 0, 1)), "an address is refused");
+    check(!bot::is_host_name(""), "the empty name is refused");
+    {
+        auto file = std::ofstream{path};
+        file << "sessions = /tmp/s\nremote-root = /tmp/r\nallow = .*\n";
+    }
+    check(!bot::load_config(path).has_value(), "a config allowing a pattern does not load");
+    std::filesystem::remove(path);
 }
 
 auto remote_url_is_built_from_config_alone() -> void
 {
-    auto config = bee::Config{};
-    config.remoteHost = "user@host";
+    auto config = bot::Config{};
     config.remoteRoot = "/srv/git";
-    check(config.has_remote(), "host and root together make a remote");
-    check(config.remote_url("kestrel") == "user@host:/srv/git/kestrel.git", "remote url is assembled");
+    check(config.remote_url("kestrel") == "/srv/git/kestrel.git", "a local remote is a path");
+    config.remoteHost = "user@host";
+    check(config.remote_url("kestrel") == "user@host:/srv/git/kestrel.git", "a remote on another machine is reached over ssh");
+}
+
+auto the_web_face_reads_and_does_nothing_else() -> void
+{
+    auto config = bot::Config{};
+    config.sessions = "/nonexistent";
+    config.remoteRoot = "/nonexistent";
+    config.runtime = "a-command-that-does-not-exist";
+    check(bot::respond(config, "POST / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 405"),
+          "with no owner named, anything but GET is refused");
+    check(bot::respond(config, "").starts_with("HTTP/1.0 405"), "an empty request is refused");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 200"), "the board is served");
+    check(bot::respond(config, "GET /project/../etc HTTP/1.1\r\n\r\n").starts_with("HTTP/1.0 404"),
+          "a project that does not exist is not found");
+    check(bot::escaped("<script>&\"") == "&lt;script&gt;&amp;&quot;", "text is escaped before it reaches a page");
+}
+
+// With an owner named the face acts, so every request has to be the owner's,
+// and a form has to have come from the face's own page.
+auto the_web_face_acts_only_for_its_owner() -> void
+{
+    auto config = bot::Config{};
+    config.sessions = "/nonexistent";
+    config.remoteRoot = "/nonexistent";
+    config.runtime = "a-command-that-does-not-exist";
+    config.owner = "owner";
+    config.whois = {"sh", "-c", "test \"$1\" = fd00::1 && echo owner || echo someone-else", "whois"};
+    auto const form = [](std::string_view origin) {
+        return std::format("POST /session/x/say HTTP/1.1\r\nHost: [fd00::2]:80\r\nOrigin: {}\r\nContent-Length: 9\r\n\r\nmessage=a", origin);
+    };
+
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::1").starts_with("HTTP/1.0 200"), "the owner may read");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::9").starts_with("HTTP/1.0 403"), "someone else may not read");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "").starts_with("HTTP/1.0 403"), "a request from nowhere is refused");
+    check(bot::respond(config, "GET / HTTP/1.1\r\n\r\n", "fd00::1; echo owner").starts_with("HTTP/1.0 403"),
+          "an address that is not one never reaches the command");
+    check(bot::respond(config, form("http://[fd00::2]:80"), "fd00::9").starts_with("HTTP/1.0 403"), "someone else may not act");
+    check(bot::respond(config, form("http://elsewhere.example"), "fd00::1").starts_with("HTTP/1.0 403"),
+          "a form sent by another site's page is refused");
+    check(bot::respond(config, "POST /session/x/say HTTP/1.1\r\nHost: fd00::2\r\n\r\nmessage=a", "fd00::1").starts_with("HTTP/1.0 403"),
+          "a form that does not say where it came from is refused");
+    check(bot::respond(config, std::string{"POST /session/x/say HTTP/1.1\r\nHost: name.example\r\nOrigin: http://name.example\r\n\r\n"}, "fd00::1")
+              .starts_with("HTTP/1.0 403"),
+          "a form addressed to a name that is not this machine's is refused");
+    check(bot::respond(config, form("http://[fd00::2]:80"), "fd00::1").starts_with("HTTP/1.0 400"),
+          "the owner's own form is acted on, and fails only because there is no such session");
+}
+
+// The log as the runtime writes it, carrying the adapter's records.
+auto a_transcript_is_read_from_the_log() -> void
+{
+    auto const log = std::string{"2026-01-01T00:00:00Z stdout F \x1eyou\n"
+                                 "2026-01-01T00:00:00Z stdout F do the work\n"
+                                 "2026-01-01T00:00:01Z stdout F \x1e" "agent\n"
+                                 "2026-01-01T00:00:01Z stdout P first half, \n"
+                                 "2026-01-01T00:00:01Z stdout F second half\n"
+                                 "2026-01-01T00:00:01Z stdout F and a second line\n"
+                                 "2026-01-01T00:00:02Z stdout F \x1e" "done\n"
+                                 "2026-01-01T00:00:02Z stdout F \n"};
+    auto const events = bot::events_in(log);
+    check(events.size() == 3, "each record is one event");
+    check(events.size() == 3 && events[0].kind == "you" && events[0].text == "do the work", "a message is read back");
+    check(events.size() == 3 && events[1].text == "first half, second half\nand a second line",
+          "a line the runtime split is joined, and separate lines stay separate");
+    check(events.size() == 3 && events[2].kind == "done" && events[2].text.empty(), "the end of a turn is an event");
+    check(bot::events_in("").empty() && bot::events_in("not a log at all").empty(), "something that is not a log is no events");
 }
 
 }
@@ -100,7 +190,11 @@ auto main() -> int
     names_that_could_reach_a_remote_shell_are_refused();
     commands_run_without_a_shell();
     config_rejects_what_it_cannot_understand();
+    only_plain_host_names_are_allowed();
     remote_url_is_built_from_config_alone();
+    the_web_face_reads_and_does_nothing_else();
+    the_web_face_acts_only_for_its_owner();
+    a_transcript_is_read_from_the_log();
 
     if (failures == 0) {
         std::cout << "all unit checks passed\n";
